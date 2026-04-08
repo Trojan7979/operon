@@ -183,6 +183,21 @@ class ChatResponse(BaseModel):
     invokedTools: list[dict] = Field(default_factory=list)
 
 
+class LlmProbeRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=240)
+    maxOutputTokens: int = Field(default=96, ge=32, le=256)
+    temperature: float = Field(default=0.2, ge=0, le=1)
+
+
+class LlmProbeResponse(BaseModel):
+    model: str
+    text: str
+    promptChars: int
+    maxOutputTokens: int
+    temperature: float
+    usedFallback: bool = False
+
+
 class SlaRecordOut(BaseModel):
     id: str
     name: str

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import auth, chat, dashboard, employees, meetings, rbac, sla, tools, workflows
+from app.api.routes import auth, chat, dashboard, dev, employees, meetings, rbac, sla, tools, workflows
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -12,3 +12,4 @@ api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(rbac.router, prefix="/rbac", tags=["rbac"])
 api_router.include_router(sla.router, prefix="/sla", tags=["sla"])
 api_router.include_router(tools.router, prefix="/tools", tags=["tools"])
+api_router.include_router(dev.router, prefix="/dev", tags=["dev"])

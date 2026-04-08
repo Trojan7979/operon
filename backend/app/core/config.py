@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     google_cloud_region: str = "us-central1"
     vertex_ai_model: str = "gemini-2.5-flash-preview-04-17"
     enable_vertex_ai: bool = False
+    enable_dev_llm_endpoint: bool = False
 
     database_url: str = "sqlite+aiosqlite:///./operon.db"
 
