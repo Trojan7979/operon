@@ -7,7 +7,7 @@ from app.core.security import get_subject_from_token
 from app.db.models import User
 from app.db.session import get_db_session
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 
 async def get_current_user(
