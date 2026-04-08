@@ -212,7 +212,7 @@ export default function App() {
             {activeTab === 'sla' && <SLAMonitor token={token} />}
             {activeTab === 'chat' && <AgentChat token={token} />}
             {activeTab === 'audit' && <AuditTrailView data={liveData} />}
-            {activeTab === 'rbac' && <RBACView currentUser={user} token={token} />}
+            {activeTab === 'rbac' && <RBACView token={token} />}
           </div>
         </div>
       </main>
