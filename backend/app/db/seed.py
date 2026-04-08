@@ -84,8 +84,8 @@ async def seed_database(session: AsyncSession) -> None:
         ("u-1", "Admin User", "admin@nexuscore.ai", "admin123", "Super Admin", "AU", "IT"),
         ("u-2", "Sarah Chen", "sarah@nexuscore.ai", "sarah123", "VP Engineering", "SC", "Engineering"),
         ("u-3", "James Rodriguez", "james@nexuscore.ai", "james123", "Product Manager", "JR", "Product"),
-        ("u-4", "Priya Patel", "priya@nexuscore.ai", "priya123", "UX Designer", "PP", "Design"),
-        ("u-5", "Alex Kim", "alex@nexuscore.ai", "alex123", "Backend Lead", "AK", "Engineering"),
+        ("u-4", "Rupam Jana", "rupam@nexuscore.ai", "rupam123", "Backend Lead", "RJ", "Engineering"),
+        ("u-5", "Cassandra Vale", "cassandra@nexuscore.ai", "cassandra123", "UX Designer", "CV", "Design"),
         ("u-6", "Maria Lopez", "maria@nexuscore.ai", "maria123", "HR Manager", "ML", "HR"),
         ("u-7", "David Brown", "david@nexuscore.ai", "david123", "Auditor", "DB", "Compliance"),
     ]
@@ -168,7 +168,7 @@ async def seed_database(session: AsyncSession) -> None:
         Workflow(
             id="wf-902",
             workflow_type="Employee Onboarding",
-            name="Sarah Connor (Engineering)",
+            name="Taniya Kundu (Engineering)",
             status="completed",
             health=100,
             progress=100,
@@ -269,10 +269,10 @@ async def seed_database(session: AsyncSession) -> None:
         )
 
     employees = [
-        ("emp-1", "Sarah Connor", "Senior Engineer", "Engineering", "sarah.connor@nexuscore.ai", "+1 (555) 234-5678", "San Francisco, CA", "Apr 15, 2026", "onboarding", 75, "SC"),
-        ("emp-2", "James Rodriguez", "Product Manager", "Product", "james.rodriguez@nexuscore.ai", "+1 (555) 345-6789", "New York, NY", "Mar 01, 2026", "active", 100, "JR"),
-        ("emp-3", "Priya Patel", "UX Designer", "Design", "priya.patel@nexuscore.ai", "+1 (555) 456-7890", "Austin, TX", "Feb 15, 2026", "active", 100, "PP"),
-        ("emp-4", "Alex Kim", "Backend Lead", "Engineering", "alex.kim@nexuscore.ai", "+1 (555) 567-8901", "Seattle, WA", "Jan 10, 2026", "active", 100, "AK"),
+        ("emp-1", "Taniya Kundu", "Senior Engineer", "Engineering", "taniya.kundu@nexuscore.ai", "+1 (555) 234-5678", "San Francisco, CA", "Apr 15, 2026", "onboarding", 75, "TK"),
+        ("emp-2", "Rupam Jana", "Backend Lead", "Engineering", "rupam.jana@nexuscore.ai", "+1 (555) 567-8901", "New York, NY", "Jan 10, 2026", "active", 100, "RJ"),
+        ("emp-3", "James Rodriguez", "Product Manager", "Product", "james.rodriguez@nexuscore.ai", "+1 (555) 345-6789", "Seattle, WA", "Mar 01, 2026", "active", 100, "JR"),
+        ("emp-4", "Cassandra Vale", "UX Designer", "Design", "cassandra.vale@nexuscore.ai", "+1 (555) 456-7890", "Austin, TX", "Feb 15, 2026", "active", 100, "CV"),
     ]
     for employee in employees:
         session.add(
@@ -302,7 +302,7 @@ async def seed_database(session: AsyncSession) -> None:
             "analyzed",
             True,
             "MeetIntel Core",
-            ["Sarah Chen", "James Rodriguez", "Priya Patel", "Alex Kim"],
+            ["Sarah Chen", "James Rodriguez", "Cassandra Vale", "Rupam Jana"],
         ),
         (
             "mt-2",
@@ -314,7 +314,7 @@ async def seed_database(session: AsyncSession) -> None:
             "analyzed",
             True,
             "MeetIntel Core",
-            ["Alex Kim", "Dev Team", "Scrum Master"],
+            ["Rupam Jana", "Dev Team", "Scrum Master"],
         ),
         (
             "mt-3",
@@ -359,12 +359,12 @@ async def seed_database(session: AsyncSession) -> None:
 
     transcript_lines = [
         ("mt-1", 1, "2:01", "Sarah Chen", "Let's start with the API migration timeline. Are we on track for the April deadline?"),
-        ("mt-1", 2, "2:02", "Alex Kim", "We're about 70% through the migration. The auth service is done, but the billing API needs another two weeks."),
+        ("mt-1", 2, "2:02", "Rupam Jana", "We're about 70% through the migration. The auth service is done, but the billing API needs another two weeks."),
         ("mt-1", 3, "2:04", "Sarah Chen", "That pushes us past the deadline. Alex, can you pull in one more engineer to parallelize the billing work?"),
-        ("mt-1", 4, "2:05", "Alex Kim", "Yes, I'll grab someone from the platform team. We should be able to hit April 15th."),
+        ("mt-1", 4, "2:05", "Rupam Jana", "Yes, I'll grab someone from the platform team. We should be able to hit April 15th."),
         ("mt-1", 5, "2:18", "Sarah Chen", "Agreed. Let's go with Redis. Alex, write up a brief ADR by Friday."),
         ("mt-2", 1, "11:01", "Scrum Master", "Let's go around - what went well this sprint?"),
-        ("mt-2", 2, "11:15", "Alex Kim", "We need to quarantine flaky tests. I'll set up a separate test suite."),
+        ("mt-2", 2, "11:15", "Rupam Jana", "We need to quarantine flaky tests. I'll set up a separate test suite."),
         ("mt-3", 1, "3:01", "Sales Lead", "Globex contract renewal is due in 90 days. Current ARR is $1.2M."),
         ("mt-3", 2, "3:12", "VP Sales", "Prepare a proposal with the renewal and analytics upsell. Let's get it to them within two weeks."),
     ]
@@ -380,13 +380,13 @@ async def seed_database(session: AsyncSession) -> None:
         )
 
     meeting_items = [
-        ("mt-1", "decision", "Use Redis over Memcached for caching layer", "Alex Kim", "decided", None, None),
-        ("mt-1", "decision", "Target April 15th for API migration completion", "Alex Kim", "decided", None, None),
-        ("mt-1", "action", "Pull in engineer from platform team for billing API", "Alex Kim", "in-progress", "Mar 29", 1),
-        ("mt-1", "action", "Write ADR for Redis caching decision", "Alex Kim", "pending", "Apr 4", 7),
+        ("mt-1", "decision", "Use Redis over Memcached for caching layer", "Rupam Jana", "decided", None, None),
+        ("mt-1", "decision", "Target April 15th for API migration completion", "Rupam Jana", "decided", None, None),
+        ("mt-1", "action", "Pull in engineer from platform team for billing API", "Rupam Jana", "in-progress", "Mar 29", 1),
+        ("mt-1", "action", "Write ADR for Redis caching decision", "Rupam Jana", "pending", "Apr 4", 7),
         ("mt-1", "escalation", "Billing API migration behind schedule - resource needed", "Sarah Chen", "resolved", None, None),
-        ("mt-2", "decision", "Quarantine flaky integration tests into separate suite", "Alex Kim", "decided", None, None),
-        ("mt-2", "action", "Set up flaky test quarantine suite", "Alex Kim", "pending", "Apr 5", 6),
+        ("mt-2", "decision", "Quarantine flaky integration tests into separate suite", "Rupam Jana", "decided", None, None),
+        ("mt-2", "action", "Set up flaky test quarantine suite", "Rupam Jana", "pending", "Apr 5", 6),
         ("mt-3", "decision", "Offer 3-year renewal with 5% volume discount to Globex", "VP Sales", "decided", None, None),
         ("mt-3", "action", "Prepare renewal and upsell proposal for Globex", "Account Manager", "pending", "Apr 9", 10),
     ]
@@ -406,7 +406,7 @@ async def seed_database(session: AsyncSession) -> None:
     sla_records = [
         ("sla-1", "Acme Corp Invoice Processing", "Procure-to-Pay", 4, 2.8, "on-track", "Manager Approval", "Nexus Orchestrator", "Will complete 45 min before SLA deadline", 92, None),
         ("sla-2", "Globex Contract Renewal", "Contract Lifecycle", 48, 46, "at-risk", "Legal Review", "Human (Legal)", "SLA breach in 2h 00m - auto-escalation triggered", 28, "Reassigned to Senior Legal Counsel + sent executive notification"),
-        ("sla-3", "Sarah Connor Onboarding", "Employee Onboarding", 24, 3.5, "on-track", "IT Provisioning", "Action Exec Alpha", "On track - 85% of steps already automated", 98, None),
+        ("sla-3", "Taniya Kundu Onboarding", "Employee Onboarding", 24, 3.5, "on-track", "IT Provisioning", "Action Exec Alpha", "On track - 85% of steps already automated", 98, None),
         ("sla-4", "Q3 Vendor Audit", "Compliance", 72, 68, "breached", "Document Collection", "Data Fetcher v4", "SLA breached 4h ago - root cause: vendor non-responsive", 5, "Escalated to VP Procurement + vendor penalty clause activated"),
     ]
     for record in sla_records:

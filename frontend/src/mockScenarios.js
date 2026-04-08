@@ -75,7 +75,7 @@ export const scenarios = [
     steps: [
       {
         id: 1, name: 'Offer Acceptance Detected', agent: 'System',
-        reasoning: 'DocuSign webhook received: Sarah Connor signed offer letter for Senior Engineer role. Start date: April 15. Triggering onboarding workflow.',
+        reasoning: 'DocuSign webhook received: Taniya Kundu signed offer letter for Senior Engineer role. Start date: April 15. Triggering onboarding workflow.',
         confidence: 100, duration: 1500,
         alternatives: []
       },
@@ -186,30 +186,30 @@ export const meetingTranscript = {
   title: 'Q3 Product Strategy Sync',
   date: 'March 28, 2026 — 2:00 PM',
   duration: '47 minutes',
-  attendees: ['Sarah Chen (VP Eng)', 'James Rodriguez (PM)', 'Priya Patel (Design)', 'Alex Kim (Backend Lead)'],
+  attendees: ['Sarah Chen (VP Eng)', 'James Rodriguez (PM)', 'Cassandra Vale (Design)', 'Rupam Jana (Backend Lead)'],
   lines: [
     { time: '2:01', speaker: 'Sarah Chen', text: 'Let\'s start with the API migration timeline. Are we on track for the April deadline?' },
-    { time: '2:02', speaker: 'Alex Kim', text: 'We\'re about 70% through the migration. The auth service is done, but the billing API needs another two weeks.' },
+    { time: '2:02', speaker: 'Rupam Jana', text: 'We\'re about 70% through the migration. The auth service is done, but the billing API needs another two weeks.' },
     { time: '2:04', speaker: 'Sarah Chen', text: 'That pushes us past the deadline. Alex, can you pull in one more engineer to parallelize the billing work?' },
-    { time: '2:05', speaker: 'Alex Kim', text: 'Yes, I\'ll grab someone from the platform team. We should be able to hit April 15th.' },
+    { time: '2:05', speaker: 'Rupam Jana', text: 'Yes, I\'ll grab someone from the platform team. We should be able to hit April 15th.' },
     { time: '2:07', speaker: 'James Rodriguez', text: 'For the new dashboard feature, design review is complete. Priya, when can engineering get the final mocks?' },
-    { time: '2:08', speaker: 'Priya Patel', text: 'I\'ll have the Figma files updated and shared by end of day Thursday.' },
+    { time: '2:08', speaker: 'Cassandra Vale', text: 'I\'ll have the Figma files updated and shared by end of day Thursday.' },
     { time: '2:10', speaker: 'Sarah Chen', text: 'Great. James, please create the epic in Jira once you have the mocks. Target sprint 24 for kickoff.' },
     { time: '2:12', speaker: 'James Rodriguez', text: 'Got it. Also, the client demo for Globex is next Tuesday. Alex, we need the staging environment updated.' },
-    { time: '2:13', speaker: 'Alex Kim', text: 'I\'ll deploy the latest build to staging by Monday EOD.' },
+    { time: '2:13', speaker: 'Rupam Jana', text: 'I\'ll deploy the latest build to staging by Monday EOD.' },
     { time: '2:15', speaker: 'Sarah Chen', text: 'One more thing — we need to decide on the caching strategy. Redis or Memcached?' },
-    { time: '2:17', speaker: 'Alex Kim', text: 'Redis. It gives us pub/sub for real-time features and better persistence options.' },
+    { time: '2:17', speaker: 'Rupam Jana', text: 'Redis. It gives us pub/sub for real-time features and better persistence options.' },
     { time: '2:18', speaker: 'Sarah Chen', text: 'Agreed. Let\'s go with Redis. Alex, write up a brief ADR by Friday.' },
   ],
   extractedItems: [
-    { type: 'decision', text: 'Use Redis over Memcached for caching layer', owner: 'Alex Kim', status: 'decided' },
-    { type: 'decision', text: 'Target April 15th for API migration completion', owner: 'Alex Kim', status: 'decided' },
+    { type: 'decision', text: 'Use Redis over Memcached for caching layer', owner: 'Rupam Jana', status: 'decided' },
+    { type: 'decision', text: 'Target April 15th for API migration completion', owner: 'Rupam Jana', status: 'decided' },
     { type: 'decision', text: 'Dashboard feature kickoff in Sprint 24', owner: 'James Rodriguez', status: 'decided' },
-    { type: 'action', text: 'Pull in engineer from platform team for billing API', owner: 'Alex Kim', deadline: 'March 29', status: 'in-progress', daysLeft: 1 },
-    { type: 'action', text: 'Share updated Figma mocks with engineering', owner: 'Priya Patel', deadline: 'March 31', status: 'pending', daysLeft: 3 },
+    { type: 'action', text: 'Pull in engineer from platform team for billing API', owner: 'Rupam Jana', deadline: 'March 29', status: 'in-progress', daysLeft: 1 },
+    { type: 'action', text: 'Share updated Figma mocks with engineering', owner: 'Cassandra Vale', deadline: 'March 31', status: 'pending', daysLeft: 3 },
     { type: 'action', text: 'Create dashboard epic in Jira', owner: 'James Rodriguez', deadline: 'April 1', status: 'pending', daysLeft: 4 },
-    { type: 'action', text: 'Deploy latest build to staging environment', owner: 'Alex Kim', deadline: 'March 31', status: 'in-progress', daysLeft: 3 },
-    { type: 'action', text: 'Write ADR for Redis caching decision', owner: 'Alex Kim', deadline: 'April 4', status: 'pending', daysLeft: 7 },
+    { type: 'action', text: 'Deploy latest build to staging environment', owner: 'Rupam Jana', deadline: 'March 31', status: 'in-progress', daysLeft: 3 },
+    { type: 'action', text: 'Write ADR for Redis caching decision', owner: 'Rupam Jana', deadline: 'April 4', status: 'pending', daysLeft: 7 },
     { type: 'escalation', text: 'Billing API migration behind schedule — resource needed', owner: 'Sarah Chen', status: 'resolved' }
   ]
 };

@@ -1,46 +1,40 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  UserPlus, Users, Search, Upload, Check, ChevronRight,
-  Mail, Phone, Building, Briefcase, Calendar, MapPin,
-  Bot, Loader, CheckCircle2, Clock, Eye, X, Camera
+  UserPlus, Search, Mail, Phone, Building, Briefcase, Calendar, MapPin,
+  Bot, Loader, CheckCircle2, Clock, Camera
 } from 'lucide-react';
-
-const existingEmployees = [
-  { id: 'emp-1', name: 'Sarah Connor', role: 'Senior Engineer', department: 'Engineering', email: 'sarah.connor@nexuscore.ai', phone: '+1 (555) 234-5678', location: 'San Francisco, CA', startDate: 'Apr 15, 2026', status: 'onboarding', progress: 75, avatar: 'SC' },
-  { id: 'emp-2', name: 'James Rodriguez', role: 'Product Manager', department: 'Product', email: 'james.rodriguez@nexuscore.ai', phone: '+1 (555) 345-6789', location: 'New York, NY', startDate: 'Mar 01, 2026', status: 'active', progress: 100, avatar: 'JR' },
-  { id: 'emp-3', name: 'Priya Patel', role: 'UX Designer', department: 'Design', email: 'priya.patel@nexuscore.ai', phone: '+1 (555) 456-7890', location: 'Austin, TX', startDate: 'Feb 15, 2026', status: 'active', progress: 100, avatar: 'PP' },
-  { id: 'emp-4', name: 'Alex Kim', role: 'Backend Lead', department: 'Engineering', email: 'alex.kim@nexuscore.ai', phone: '+1 (555) 567-8901', location: 'Seattle, WA', startDate: 'Jan 10, 2026', status: 'active', progress: 100, avatar: 'AK' },
-];
+import { createEmployee, fetchEmployees } from '../api';
 
 const onboardingAgentSteps = [
   { question: "Welcome! I'm the Onboarding Agent. Let's get started. What is the new employee's full name?", field: 'name', type: 'text' },
-  { question: "Great! What role will they be joining as?", field: 'role', type: 'text' },
-  { question: "Which department?", field: 'department', type: 'select', options: ['Engineering', 'Product', 'Design', 'Marketing', 'Sales', 'Finance', 'HR', 'Legal'] },
+  { question: 'Great! What role will they be joining as?', field: 'role', type: 'text' },
+  { question: 'Which department?', field: 'department', type: 'select', options: ['Engineering', 'Product', 'Design', 'Marketing', 'Sales', 'Finance', 'HR', 'Legal'] },
   { question: "What's their email address?", field: 'email', type: 'text' },
-  { question: "Phone number?", field: 'phone', type: 'text' },
-  { question: "Office location?", field: 'location', type: 'text' },
-  { question: "What is their start date?", field: 'startDate', type: 'date' },
-  { question: "Please upload their profile photo.", field: 'photo', type: 'file' },
+  { question: 'Phone number?', field: 'phone', type: 'text' },
+  { question: 'Office location?', field: 'location', type: 'text' },
+  { question: 'What is their start date?', field: 'startDate', type: 'date' },
+  { question: 'Please upload their profile photo.', field: 'photo', type: 'file' },
 ];
 
 const automationSteps = [
-  { name: 'Identity Verification', agent: 'Shield Verifier', duration: 2000 },
-  { name: 'Background Check Initiated', agent: 'Data Fetcher v4', duration: 2500 },
-  { name: 'Google Workspace Account Created', agent: 'Action Exec Alpha', duration: 1500 },
-  { name: 'Slack & GitHub Provisioned', agent: 'Action Exec Alpha', duration: 1800 },
-  { name: 'Hardware Request Submitted', agent: 'Nexus Orchestrator', duration: 1200 },
-  { name: 'Manager Notification Sent', agent: 'Action Exec Alpha', duration: 1000 },
-  { name: 'Day 1 Calendar Created', agent: 'Action Exec Alpha', duration: 1500 },
-  { name: 'Onboarding Complete ✓', agent: 'Shield Verifier', duration: 1000 },
+  { name: 'Identity Verification', agent: 'Shield Verifier', duration: 900 },
+  { name: 'Background Check Initiated', agent: 'Data Fetcher v4', duration: 900 },
+  { name: 'Google Workspace Account Created', agent: 'Action Exec Alpha', duration: 900 },
+  { name: 'Slack and GitHub Provisioned', agent: 'Action Exec Alpha', duration: 900 },
+  { name: 'Hardware Request Submitted', agent: 'Nexus Orchestrator', duration: 900 },
+  { name: 'Manager Notification Sent', agent: 'Action Exec Alpha', duration: 900 },
+  { name: 'Day 1 Calendar Created', agent: 'Action Exec Alpha', duration: 900 },
+  { name: 'Onboarding Complete', agent: 'Shield Verifier', duration: 900 },
 ];
 
-export function OnboardingView() {
-  const [view, setView] = useState('portal'); // portal | new | detail
-  const [employees, setEmployees] = useState(existingEmployees);
+export function OnboardingView({ token }) {
+  const [view, setView] = useState('portal');
+  const [employees, setEmployees] = useState([]);
   const [selectedEmployee, setSelectedEmployee] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  // Onboarding form state
   const [currentStep, setCurrentStep] = useState(0);
   const [formData, setFormData] = useState({});
   const [chatHistory, setChatHistory] = useState([]);
@@ -48,12 +42,40 @@ export function OnboardingView() {
   const [isAgentTyping, setIsAgentTyping] = useState(false);
   const [automationPhase, setAutomationPhase] = useState(false);
   const [automationIdx, setAutomationIdx] = useState(-1);
-  const [photoPreview, setPhotoPreview] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  const filteredEmployees = employees.filter(e =>
-    e.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    e.department.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    e.role.toLowerCase().includes(searchQuery.toLowerCase())
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadEmployees = async () => {
+      setLoading(true);
+      try {
+        const data = await fetchEmployees(token);
+        if (!cancelled) {
+          setEmployees(data);
+          setError('');
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.message || 'Unable to load employees.');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    loadEmployees();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  const filteredEmployees = employees.filter(employee =>
+    employee.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    employee.department.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    employee.role.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   const startOnboarding = () => {
@@ -64,7 +86,8 @@ export function OnboardingView() {
     setUserInput('');
     setAutomationPhase(false);
     setAutomationIdx(-1);
-    setPhotoPreview(null);
+    setSubmitting(false);
+    setError('');
   };
 
   const handleSubmitAnswer = () => {
@@ -78,7 +101,7 @@ export function OnboardingView() {
     setUserInput('');
     setIsAgentTyping(true);
 
-    setTimeout(() => {
+    window.setTimeout(() => {
       setIsAgentTyping(false);
       if (currentStep < onboardingAgentSteps.length - 1) {
         const nextStep = currentStep + 1;
@@ -89,67 +112,73 @@ export function OnboardingView() {
           sender: 'agent',
           text: `Excellent! I have all the details for ${formData.name || answer}. Initiating automated onboarding sequence now...`
         }]);
-        setTimeout(() => startAutomation(), 1500);
+        window.setTimeout(() => {
+          setAutomationPhase(true);
+          setAutomationIdx(0);
+        }, 800);
       }
-    }, 800);
+    }, 600);
   };
 
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        setPhotoPreview(ev.target.result);
-        setFormData(prev => ({ ...prev, photo: ev.target.result }));
-        setChatHistory(prev => [...prev, { sender: 'user', text: '📷 Photo uploaded', isPhoto: true, photoUrl: ev.target.result }]);
-        setIsAgentTyping(true);
-        setTimeout(() => {
-          setIsAgentTyping(false);
-          setChatHistory(prev => [...prev, {
-            sender: 'agent',
-            text: `Perfect! I have all the information. Let me now run the automated onboarding sequence for ${formData.name || 'the new employee'}...`
-          }]);
-          setTimeout(() => startAutomation(), 1500);
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const photoData = event.target.result;
+      setFormData(prev => ({ ...prev, photo: photoData }));
+      setChatHistory(prev => [...prev, { sender: 'user', text: 'Photo uploaded', isPhoto: true, photoUrl: photoData }]);
+      setIsAgentTyping(true);
+      window.setTimeout(() => {
+        setIsAgentTyping(false);
+        setChatHistory(prev => [...prev, {
+          sender: 'agent',
+          text: `Perfect! I have all the information. Let me now run the automated onboarding sequence for ${formData.name || 'the new employee'}...`
+        }]);
+        window.setTimeout(() => {
+          setAutomationPhase(true);
+          setAutomationIdx(0);
         }, 800);
-      };
-      reader.readAsDataURL(file);
-    }
+      }, 600);
+    };
+    reader.readAsDataURL(file);
   };
 
-  const startAutomation = () => {
-    setAutomationPhase(true);
-    setAutomationIdx(0);
-  };
-
-  React.useEffect(() => {
+  useEffect(() => {
     if (!automationPhase || automationIdx < 0 || automationIdx >= automationSteps.length) return;
 
-    const timer = setTimeout(() => {
+    const timer = window.setTimeout(async () => {
       if (automationIdx >= automationSteps.length - 1) {
-        // Done — add employee to list
-        const newEmp = {
-          id: `emp-new-${Date.now()}`,
-          name: formData.name || 'New Employee',
-          role: formData.role || 'Team Member',
-          department: formData.department || 'Engineering',
-          email: formData.email || 'new@nexuscore.ai',
-          phone: formData.phone || '',
-          location: formData.location || '',
-          startDate: formData.startDate || 'TBD',
-          status: 'onboarding',
-          progress: 100,
-          avatar: (formData.name || 'NE').split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2),
-          photo: formData.photo || null
-        };
-        setEmployees(prev => [newEmp, ...prev]);
-        setAutomationIdx(prev => prev + 1);
+        if (submitting) return;
+        setSubmitting(true);
+        try {
+          const createdEmployee = await createEmployee(token, {
+            name: formData.name || 'New Employee',
+            role: formData.role || 'Team Member',
+            department: formData.department || 'Engineering',
+            email: formData.email || 'new@nexuscore.ai',
+            phone: formData.phone || '',
+            location: formData.location || '',
+            startDate: formData.startDate || 'TBD',
+            photoUrl: formData.photo || null,
+          });
+          setEmployees(prev => [createdEmployee, ...prev]);
+          setSelectedEmployee(createdEmployee);
+          setAutomationIdx(prev => prev + 1);
+        } catch (err) {
+          setError(err.message || 'Unable to complete onboarding.');
+          setAutomationPhase(false);
+          setAutomationIdx(-1);
+        } finally {
+          setSubmitting(false);
+        }
       } else {
         setAutomationIdx(prev => prev + 1);
       }
-    }, automationSteps[automationIdx]?.duration || 1500);
+    }, automationSteps[automationIdx]?.duration || 900);
 
-    return () => clearTimeout(timer);
-  }, [automationPhase, automationIdx]);
+    return () => window.clearTimeout(timer);
+  }, [automationIdx, automationPhase, formData, submitting, token]);
 
   return (
     <div>
@@ -171,10 +200,14 @@ export function OnboardingView() {
         </div>
       </div>
 
-      {/* === PORTAL VIEW === */}
+      {error && (
+        <div className="mb-6 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
       {view === 'portal' && (
         <>
-          {/* Stats */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
             <div className="glass-panel p-4 rounded-2xl text-center">
               <p className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Total Employees</p>
@@ -182,19 +215,18 @@ export function OnboardingView() {
             </div>
             <div className="glass-panel p-4 rounded-2xl text-center">
               <p className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Active</p>
-              <p className="text-3xl font-bold text-green-400">{employees.filter(e => e.status === 'active').length}</p>
+              <p className="text-3xl font-bold text-green-400">{employees.filter(employee => employee.status === 'active').length}</p>
             </div>
             <div className="glass-panel p-4 rounded-2xl text-center">
               <p className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Onboarding</p>
-              <p className="text-3xl font-bold text-cyan-400">{employees.filter(e => e.status === 'onboarding').length}</p>
+              <p className="text-3xl font-bold text-cyan-400">{employees.filter(employee => employee.status === 'onboarding').length}</p>
             </div>
             <div className="glass-panel p-4 rounded-2xl text-center">
               <p className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Departments</p>
-              <p className="text-3xl font-bold text-purple-400">{new Set(employees.map(e => e.department)).size}</p>
+              <p className="text-3xl font-bold text-purple-400">{new Set(employees.map(employee => employee.department)).size}</p>
             </div>
           </div>
 
-          {/* Search */}
           <div className="relative mb-6">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
             <input
@@ -206,36 +238,38 @@ export function OnboardingView() {
             />
           </div>
 
-          {/* Employee Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredEmployees.map(emp => (
-              <div
-                key={emp.id}
-                onClick={() => { setSelectedEmployee(emp); setView('detail'); }}
-                className="glass-panel p-5 rounded-2xl cursor-pointer hover:border-cyan-500/30 transition-all group"
-              >
-                <div className="flex items-center gap-4 mb-4">
-                  <div className="h-12 w-12 rounded-full bg-gradient-to-br from-cyan-500/20 to-purple-500/20 flex items-center justify-center text-white font-bold text-sm border border-zinc-700 overflow-hidden">
-                    {emp.photo ? <img src={emp.photo} alt="" className="h-full w-full object-cover" /> : emp.avatar}
+          {loading ? (
+            <div className="glass-panel p-8 rounded-2xl text-zinc-400">Loading employees...</div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredEmployees.map(employee => (
+                <div
+                  key={employee.id}
+                  onClick={() => { setSelectedEmployee(employee); setView('detail'); }}
+                  className="glass-panel p-5 rounded-2xl cursor-pointer hover:border-cyan-500/30 transition-all group"
+                >
+                  <div className="flex items-center gap-4 mb-4">
+                    <div className="h-12 w-12 rounded-full bg-gradient-to-br from-cyan-500/20 to-purple-500/20 flex items-center justify-center text-white font-bold text-sm border border-zinc-700 overflow-hidden">
+                      {employee.photo ? <img src={employee.photo} alt="" className="h-full w-full object-cover" /> : employee.avatar}
+                    </div>
+                    <div>
+                      <h3 className="text-white font-medium group-hover:text-cyan-400 transition-colors">{employee.name}</h3>
+                      <p className="text-xs text-zinc-500">{employee.role}</p>
+                    </div>
                   </div>
-                  <div>
-                    <h3 className="text-white font-medium group-hover:text-cyan-400 transition-colors">{emp.name}</h3>
-                    <p className="text-xs text-zinc-500">{emp.role}</p>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-zinc-400 flex items-center gap-1"><Building className="h-3 w-3" /> {employee.department}</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                      employee.status === 'active' ? 'bg-green-400/10 text-green-400' : 'bg-cyan-400/10 text-cyan-400'
+                    }`}>{employee.status}</span>
                   </div>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-zinc-400 flex items-center gap-1"><Building className="h-3 w-3" /> {emp.department}</span>
-                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                    emp.status === 'active' ? 'bg-green-400/10 text-green-400' : 'bg-cyan-400/10 text-cyan-400'
-                  }`}>{emp.status}</span>
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </>
       )}
 
-      {/* === DETAIL VIEW === */}
       {view === 'detail' && selectedEmployee && (
         <div className="glass-panel p-8 rounded-2xl max-w-2xl mx-auto">
           <div className="flex items-center gap-6 mb-8">
@@ -267,25 +301,12 @@ export function OnboardingView() {
               </div>
             ))}
           </div>
-          {selectedEmployee.progress < 100 && (
-            <div className="mt-6">
-              <div className="flex justify-between text-xs mb-2">
-                <span className="text-zinc-400">Onboarding Progress</span>
-                <span className="text-cyan-400">{selectedEmployee.progress}%</span>
-              </div>
-              <div className="w-full bg-zinc-800 rounded-full h-2 overflow-hidden">
-                <div className="bg-gradient-to-r from-cyan-500 to-purple-500 h-2 rounded-full" style={{ width: `${selectedEmployee.progress}%` }}></div>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
-      {/* === ONBOARDING CHAT VIEW === */}
       {view === 'new' && (
         <div className="max-w-3xl mx-auto">
           <div className="glass-panel rounded-2xl overflow-hidden">
-            {/* Chat Header */}
             <div className="bg-zinc-900/80 p-4 border-b border-zinc-800 flex items-center gap-3">
               <div className="h-8 w-8 rounded-full bg-cyan-500/20 flex items-center justify-center text-cyan-400">
                 <Bot className="h-4 w-4" />
@@ -296,7 +317,6 @@ export function OnboardingView() {
               </div>
             </div>
 
-            {/* Chat Messages */}
             <div className="p-6 max-h-[400px] overflow-y-auto space-y-4">
               {chatHistory.map((msg, idx) => (
                 <div key={idx} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}>
@@ -323,7 +343,6 @@ export function OnboardingView() {
               )}
             </div>
 
-            {/* Automation Panel */}
             {automationPhase && (
               <div className="px-6 pb-4">
                 <div className="bg-black/40 rounded-xl p-4 border border-zinc-800">
@@ -346,7 +365,10 @@ export function OnboardingView() {
                   {automationIdx >= automationSteps.length && (
                     <div className="mt-4 pt-3 border-t border-zinc-800 text-center">
                       <p className="text-green-400 text-sm font-bold">✓ Employee Successfully Onboarded!</p>
-                      <button onClick={() => setView('portal')} className="mt-2 px-4 py-2 bg-cyan-500/10 text-cyan-400 rounded-lg text-xs hover:bg-cyan-500/20">
+                      <button
+                        onClick={() => setView('portal')}
+                        className="mt-2 px-4 py-2 bg-cyan-500/10 text-cyan-400 rounded-lg text-xs hover:bg-cyan-500/20"
+                      >
                         View in Employee Portal →
                       </button>
                     </div>
@@ -355,7 +377,6 @@ export function OnboardingView() {
               </div>
             )}
 
-            {/* Input Area */}
             {!automationPhase && (
               <div className="p-4 border-t border-zinc-800">
                 {onboardingAgentSteps[currentStep]?.type === 'file' ? (
@@ -366,15 +387,15 @@ export function OnboardingView() {
                   </label>
                 ) : onboardingAgentSteps[currentStep]?.type === 'select' ? (
                   <div className="flex flex-wrap gap-2">
-                    {onboardingAgentSteps[currentStep].options.map(opt => (
+                    {onboardingAgentSteps[currentStep].options.map(option => (
                       <button
-                        key={opt}
-                        onClick={() => { setUserInput(opt); setTimeout(() => { setUserInput(opt); }, 0); }}
+                        key={option}
+                        onClick={() => setUserInput(option)}
                         className={`px-4 py-2 rounded-xl text-sm border transition-all ${
-                          userInput === opt ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-500'
+                          userInput === option ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-400' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:border-zinc-500'
                         }`}
                       >
-                        {opt}
+                        {option}
                       </button>
                     ))}
                     {userInput && (

@@ -21,7 +21,7 @@ const slaWorkflows = [
     autoAction: 'Reassigned to Senior Legal Counsel + sent executive notification'
   },
   {
-    id: 'sla-3', name: 'Sarah Connor Onboarding', type: 'Employee Onboarding',
+    id: 'sla-3', name: 'Taniya Kundu Onboarding', type: 'Employee Onboarding',
     slaHours: 24, elapsedHours: 3.5, status: 'on-track',
     currentStep: 'IT Provisioning', agent: 'Action Exec Alpha',
     prediction: 'On track — 85% of steps already automated',

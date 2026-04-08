@@ -73,7 +73,7 @@ export const mockData = {
         {
             id: 'wf-902',
             type: 'Employee Onboarding',
-            name: 'Sarah Connor (Engineering)',
+            name: 'Taniya Kundu (Engineering)',
             status: 'completed',
             health: 100,
             progress: 100,

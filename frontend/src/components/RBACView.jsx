@@ -23,13 +23,13 @@ const initialUsers = [
     permissions: ['dashboard', 'workflows', 'meetings', 'chat']
   },
   {
-    id: 'u-4', name: 'Priya Patel', email: 'priya@nexuscore.ai', role: 'UX Designer',
-    avatar: 'PP', status: 'active', department: 'Design',
+    id: 'u-4', name: 'Cassandra Vale', email: 'cassandra@nexuscore.ai', role: 'UX Designer',
+    avatar: 'CV', status: 'active', department: 'Design',
     permissions: ['dashboard', 'meetings', 'chat']
   },
   {
-    id: 'u-5', name: 'Alex Kim', email: 'alex@nexuscore.ai', role: 'Backend Lead',
-    avatar: 'AK', status: 'active', department: 'Engineering',
+    id: 'u-5', name: 'Rupam Jana', email: 'rupam@nexuscore.ai', role: 'Backend Lead',
+    avatar: 'RJ', status: 'active', department: 'Engineering',
     permissions: ['dashboard', 'simulator', 'workflows', 'agents', 'collab', 'sla', 'chat', 'audit']
   },
   {
@@ -66,7 +66,7 @@ const roleTemplates = [
   { name: 'Viewer', permissions: ['dashboard'] },
 ];
 
-export function RBACView({ currentUser }) {
+export function RBACView() {
   const [users, setUsers] = useState(initialUsers);
   const [selectedUser, setSelectedUser] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
