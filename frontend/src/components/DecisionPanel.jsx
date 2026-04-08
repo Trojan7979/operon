@@ -4,6 +4,29 @@ import { X, BrainCircuit, CheckCircle2, XCircle, BarChart3 } from 'lucide-react'
 export function DecisionPanel({ step, onClose }) {
   if (!step) return null;
 
+  const confidence = typeof step.confidence === 'number' ? step.confidence : null;
+  const confidenceLabel = confidence === null ? 'N/A' : `${confidence}%`;
+  const confidenceColor =
+    confidence === null
+      ? 'text-zinc-400'
+      : confidence >= 95
+        ? 'text-green-400'
+        : confidence >= 85
+          ? 'text-yellow-400'
+          : 'text-red-400';
+  const confidenceBarColor =
+    confidence === null
+      ? 'bg-zinc-600'
+      : confidence >= 95
+        ? 'bg-green-500'
+        : confidence >= 85
+          ? 'bg-yellow-500'
+          : 'bg-red-500';
+  const reasoning =
+    step.reasoning ||
+    step.detail ||
+    'Detailed reasoning is not available for this backend step yet.';
+
   return (
     <div className="fixed inset-0 z-[100] flex justify-end" onClick={onClose}>
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
@@ -35,14 +58,14 @@ export function DecisionPanel({ step, onClose }) {
               <p className="text-xs text-zinc-500 uppercase tracking-wider flex items-center gap-1">
                 <BarChart3 className="h-3 w-3" /> Confidence Score
               </p>
-              <span className={`text-lg font-bold font-mono ${step.confidence >= 95 ? 'text-green-400' : step.confidence >= 85 ? 'text-yellow-400' : 'text-red-400'}`}>
-                {step.confidence}%
+              <span className={`text-lg font-bold font-mono ${confidenceColor}`}>
+                {confidenceLabel}
               </span>
             </div>
             <div className="w-full bg-zinc-800 rounded-full h-2 overflow-hidden">
               <div
-                className={`h-2 rounded-full transition-all ${step.confidence >= 95 ? 'bg-green-500' : step.confidence >= 85 ? 'bg-yellow-500' : 'bg-red-500'}`}
-                style={{ width: `${step.confidence}%` }}
+                className={`h-2 rounded-full transition-all ${confidenceBarColor}`}
+                style={{ width: `${confidence ?? 0}%` }}
               ></div>
             </div>
           </div>
@@ -53,7 +76,7 @@ export function DecisionPanel({ step, onClose }) {
               <BrainCircuit className="h-3 w-3" /> Reasoning Chain
             </p>
             <div className="bg-black/40 p-4 rounded-lg border-l-2 border-cyan-500">
-              <p className="text-sm text-zinc-200 leading-relaxed">{step.reasoning}</p>
+              <p className="text-sm text-zinc-200 leading-relaxed">{reasoning}</p>
             </div>
           </div>
 
