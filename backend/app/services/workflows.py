@@ -60,7 +60,9 @@ class WorkflowEngine:
             next_pending.status = "in-progress"
             workflow.current_step = next_pending.name
             workflow.assigned_agent = next_pending.agent
-            completed_steps = sum(1 for step in steps if step.status == "completed")
+            completed_steps = sum(
+                1 for step in steps if step.status in {"completed", "self-corrected"}
+            )
             workflow.progress = round((completed_steps / len(steps)) * 100)
             workflow.status = "in-progress"
         else:

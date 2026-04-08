@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     google_cloud_project: str | None = None
     google_cloud_region: str = "us-central1"
-    vertex_ai_model: str = "gemini-2.5-flash-preview-04-17"
+    vertex_ai_model: str = "gemini-2.5-flash"
     enable_vertex_ai: bool = False
     enable_dev_llm_endpoint: bool = False
 
@@ -24,7 +24,12 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
 
     cors_origins: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["http://localhost:5173", "http://localhost:3000"]
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+        ]
     )
 
     mcp_calendar_server: str = "calendar-mcp"
@@ -45,7 +50,16 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, list):
             return value
-        return [item.strip() for item in value.split(",") if item.strip()]
+        cleaned = value.strip()
+        if cleaned.startswith("[") and cleaned.endswith("]"):
+            cleaned = cleaned[1:-1]
+
+        origins: list[str] = []
+        for item in cleaned.split(","):
+            normalized = item.strip().strip('"').strip("'")
+            if normalized:
+                origins.append(normalized)
+        return origins
 
     @field_validator("debug", mode="before")
     @classmethod

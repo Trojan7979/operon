@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,13 @@ async def create_employee(
     _: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> EmployeeOut:
+    existing_employee = await session.scalar(select(Employee).where(Employee.email == payload.email))
+    if existing_employee is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An employee with email {payload.email} already exists.",
+        )
+
     employee = Employee(
         id=f"emp-{uuid4().hex[:8]}",
         name=payload.name,

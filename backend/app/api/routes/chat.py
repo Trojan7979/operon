@@ -14,8 +14,13 @@ coordinator = AgentCoordinator()
 @router.post("", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> ChatResponse:
-    message, invoked_tools = await coordinator.respond(session, payload.agentId, payload.message)
+    message, invoked_tools = await coordinator.respond(
+        session,
+        payload.agentId,
+        payload.message,
+        requester_email=current_user.email,
+    )
     return ChatResponse(agentId=payload.agentId, message=message, invokedTools=invoked_tools)

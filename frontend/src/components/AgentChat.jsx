@@ -22,7 +22,7 @@ const colorClasses = {
 };
 
 const starterMessages = {
-  orchestrator: "Hello! I'm the **Nexus Orchestrator**. I coordinate workflows, approvals, and tool routing. What should we work on?",
+  orchestrator: "Hello! I'm the **Nexus Orchestrator**. I coordinate workflows, approvals, tool routing, and guided onboarding. What should we work on?",
   intel: "MeetIntel Core is online. Share a meeting, transcript, or summary request and I'll process it.",
   retrieval: "Data Fetcher v4 is ready. Ask me to find vendors, employees, tasks, or operational context.",
   executor: "Action Exec Alpha is online. I can help push actions through the workflow system.",
@@ -130,6 +130,7 @@ export function AgentChat({ token }) {
             {[
               'Check system status',
               'Start a new workflow',
+              'Onboard a new employee',
               'Find vendor info',
               'Run compliance check',
               'Summarize meetings'

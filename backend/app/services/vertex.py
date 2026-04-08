@@ -49,6 +49,26 @@ class VertexGateway:
         except Exception:
             return None
 
+        prompt = {
+            "meeting_title": title,
+            "instructions": (
+                "Extract decisions, actions, and escalations. Return strict JSON as a list "
+                "of objects with keys: type, text, owner, status, deadline, daysLeft."
+            ),
+            "transcript": transcript_lines,
+        }
+
+        try:
+            vertexai.init(
+                project=self.settings.google_cloud_project,
+                location=self.settings.google_cloud_region,
+            )
+            model = GenerativeModel(self.settings.vertex_ai_model)
+            response = model.generate_content(json.dumps(prompt))
+            return json.loads(response.text)
+        except Exception:
+            return None
+
     def _generate_text_sync(
         self,
         prompt: str,
@@ -77,7 +97,18 @@ class VertexGateway:
         except Exception as exc:
             raise RuntimeError(f"Vertex AI request failed: {exc}") from exc
 
-        text = getattr(response, "text", "") or ""
+        try:
+            text = getattr(response, "text", "") or ""
+        except Exception as exc:
+            raise RuntimeError(
+                "Vertex AI returned no usable text response. The output may have been truncated or filtered."
+            ) from exc
+
+        if not text.strip():
+            raise RuntimeError(
+                "Vertex AI returned an empty text response. The output may have been truncated or filtered."
+            )
+
         return {
             "model": self.settings.vertex_ai_model,
             "text": text.strip(),
@@ -86,23 +117,3 @@ class VertexGateway:
             "temperature": temperature,
             "usedFallback": False,
         }
-
-        prompt = {
-            "meeting_title": title,
-            "instructions": (
-                "Extract decisions, actions, and escalations. Return strict JSON as a list "
-                "of objects with keys: type, text, owner, status, deadline, daysLeft."
-            ),
-            "transcript": transcript_lines,
-        }
-
-        try:
-            vertexai.init(
-                project=self.settings.google_cloud_project,
-                location=self.settings.google_cloud_region,
-            )
-            model = GenerativeModel(self.settings.vertex_ai_model)
-            response = model.generate_content(json.dumps(prompt))
-            return json.loads(response.text)
-        except Exception:
-            return None
