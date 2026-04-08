@@ -67,7 +67,12 @@ export function AgentChat({ token }) {
       const response = await sendAgentMessage(token, selectedAgent.id, userMsg);
       setMessages(prev => [
         ...prev,
-        { sender: 'agent', text: response.message, agentId: selectedAgent.id }
+        {
+          sender: 'agent',
+          text: response.message,
+          agentId: selectedAgent.id,
+          invokedTools: response.invokedTools ?? [],
+        }
       ]);
     } catch (err) {
       setError(err.message || 'Unable to reach the agent right now.');
@@ -167,6 +172,27 @@ export function AgentChat({ token }) {
                     : 'bg-zinc-800/80 text-zinc-300 rounded-bl-none border border-zinc-700'
                 }`}>
                   {renderText(msg.text)}
+                  {msg.sender === 'agent' && msg.invokedTools?.length > 0 && (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
+                        Tool Activity
+                      </p>
+                      {msg.invokedTools.map((tool, toolIdx) => (
+                        <div
+                          key={`${tool.toolName}-${toolIdx}`}
+                          className="rounded-xl border border-cyan-500/10 bg-black/30 px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-3 mb-1">
+                            <span className="text-xs font-semibold text-cyan-300">{tool.toolName}</span>
+                            <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+                              {tool.status}
+                            </span>
+                          </div>
+                          <p className="text-xs text-zinc-400">{tool.summary}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 {msg.sender === 'user' && (
                   <div className="h-7 w-7 rounded-lg flex items-center justify-center ml-2 mt-1 flex-shrink-0 bg-zinc-800">
