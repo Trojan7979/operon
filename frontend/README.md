@@ -1,16 +1,50 @@
-# React + Vite
+# NexusCore Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite frontend for the NexusCore multi-agent productivity assistant demo.
 
-Currently, two official plugins are available:
+## What This UI Covers
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- login and session handling
+- workflow simulator with decision detail views
+- onboarding experience backed by live backend APIs
+- meetings intelligence and extracted action items
+- RBAC and SLA operational views
+- agent chat with tool activity surfaced in the interface
+- collaboration graph driven by live backend state
 
-## React Compiler
+## Local Run
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```powershell
+cd frontend
+npm install
+npm run dev
+```
 
-## Expanding the ESLint configuration
+Open:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- `http://localhost:5173/`
+
+## Backend Dependency
+
+The frontend is not useful by itself for the demo. It expects the backend API to be running at:
+
+- `http://127.0.0.1:8000/api/v1`
+
+Start the backend separately before testing login or live data flows.
+
+## Main Frontend Files
+
+- `src/App.jsx`
+  app shell, auth/session wiring, and view orchestration
+- `src/api.js`
+  backend API client and session storage helpers
+- `src/useBackendData.js`
+  dashboard/workflow polling and shared app data hook
+- `src/components/`
+  primary product surfaces such as chat, onboarding, meetings, RBAC, SLA, and workflows
+
+## Demo Notes
+
+- Demo login: `admin@nexuscore.ai` / `admin123`
+- If login shows `Failed to fetch`, the backend is usually not running
+- On this Windows setup, `npm run dev` is the safest frontend command to use
