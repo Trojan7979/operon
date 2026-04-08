@@ -1,0 +1,7 @@
+backend/.venv/
+backend/.uv-cache/
+backend/.env
+backend/operon.db
+backend/**/__pycache__/
+frontend/**/__pycache__/
+*.pyc
