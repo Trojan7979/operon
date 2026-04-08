@@ -1,0 +1,141 @@
+const API_BASE =
+  import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000/api/v1';
+
+const SESSION_KEY = 'nexuscore-session';
+
+async function request(path, { method = 'GET', token, body } = {}) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+
+  if (!response.ok) {
+    let message = 'Request failed.';
+    try {
+      const errorPayload = await response.json();
+      message = errorPayload.detail || message;
+    } catch {
+      message = response.statusText || message;
+    }
+    throw new Error(message);
+  }
+
+  if (response.status === 204) {
+    return null;
+  }
+
+  return response.json();
+}
+
+export function getStoredSession() {
+  try {
+    const raw = window.localStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function storeSession(session) {
+  window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+}
+
+export function clearStoredSession() {
+  window.localStorage.removeItem(SESSION_KEY);
+}
+
+export function login(email, password) {
+  return request('/auth/login', {
+    method: 'POST',
+    body: { email, password },
+  });
+}
+
+export function fetchCurrentUser(token) {
+  return request('/auth/me', { token });
+}
+
+export function fetchDashboardOverview(token) {
+  return request('/dashboard/overview', { token });
+}
+
+export function fetchWorkflows(token) {
+  return request('/workflows', { token });
+}
+
+export function advanceWorkflow(token, workflowId) {
+  return request(`/workflows/${workflowId}/advance`, {
+    method: 'POST',
+    token,
+  });
+}
+
+export function fetchMeetings(token) {
+  return request('/meetings', { token });
+}
+
+export function scheduleMeeting(token, payload) {
+  return request('/meetings', {
+    method: 'POST',
+    token,
+    body: payload,
+  });
+}
+
+export function analyzeMeeting(token, meetingId) {
+  return request(`/meetings/${meetingId}/analyze`, {
+    method: 'POST',
+    token,
+  });
+}
+
+export function fetchEmployees(token) {
+  return request('/employees', { token });
+}
+
+export function createEmployee(token, payload) {
+  return request('/employees', {
+    method: 'POST',
+    token,
+    body: payload,
+  });
+}
+
+export function fetchUsers(token) {
+  return request('/rbac/users', { token });
+}
+
+export function createUser(token, payload) {
+  return request('/rbac/users', {
+    method: 'POST',
+    token,
+    body: payload,
+  });
+}
+
+export function updateUser(token, userId, payload) {
+  return request(`/rbac/users/${userId}`, {
+    method: 'PATCH',
+    token,
+    body: payload,
+  });
+}
+
+export function fetchSlaOverview(token) {
+  return request('/sla/overview', { token });
+}
+
+export function sendAgentMessage(token, agentId, message) {
+  return request('/chat', {
+    method: 'POST',
+    token,
+    body: {
+      agentId,
+      message,
+    },
+  });
+}

@@ -1,7 +1,5 @@
-import React, { useState } from 'react';
-import { useSimulation } from './useSimulation';
+import React, { useEffect, useState } from 'react';
 import { WorkflowSimulator } from './components/WorkflowSimulator';
-import { MeetingIntelView } from './components/MeetingIntelView';
 import { MeetingsView } from './components/MeetingsView';
 import { AgentCollabGraph } from './components/AgentCollabGraph';
 import { SLAMonitor } from './components/SLAMonitor';
@@ -10,10 +8,18 @@ import { AgentChat } from './components/AgentChat';
 import { LoginPage } from './components/LoginPage';
 import { RBACView } from './components/RBACView';
 import {
+  clearStoredSession,
+  fetchCurrentUser,
+  getStoredSession,
+  login,
+  storeSession,
+} from './api';
+import { useBackendData } from './useBackendData';
+import {
   LayoutDashboard, GitMerge, Cpu, ShieldCheck,
   Network, Bot, Activity, AlertTriangle, Zap,
   BrainCircuit, Database, Check, RefreshCw, AlertCircle, Hexagon,
-  Play, MessageSquare, Gauge, Users, UserPlus, Video, BotMessageSquare,
+  Play, Gauge, Users, UserPlus, Video, BotMessageSquare,
   Lock, LogOut
 } from 'lucide-react';
 
@@ -26,12 +32,81 @@ const iconMap = {
 };
 
 export default function App() {
-  const [user, setUser] = useState(null);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [session, setSession] = useState(() => getStoredSession());
+  const [authError, setAuthError] = useState('');
   const [activeTab, setActiveTab] = useState('dashboard');
-  const liveData = useSimulation();
+  const user = session?.user ?? null;
+  const token = session?.access_token ?? null;
+  const {
+    data: liveData,
+    loading: liveDataLoading,
+    error: liveDataError,
+    refresh: refreshLiveData,
+    advanceWorkflow,
+  } = useBackendData(token);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const restoreSession = async () => {
+      if (!token) {
+        setAuthChecking(false);
+        return;
+      }
+
+      try {
+        const currentUser = await fetchCurrentUser(token);
+        if (!cancelled) {
+          const restoredSession = {
+            access_token: token,
+            user: currentUser,
+          };
+          setSession(restoredSession);
+          storeSession(restoredSession);
+        }
+      } catch {
+        if (!cancelled) {
+          clearStoredSession();
+          setSession(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthChecking(false);
+        }
+      }
+    };
+
+    restoreSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  const handleLogin = async (email, password) => {
+    setAuthError('');
+    const result = await login(email, password);
+    storeSession(result);
+    setSession(result);
+  };
+
+  const handleSignOut = () => {
+    clearStoredSession();
+    setSession(null);
+    setAuthError('');
+  };
+
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center text-zinc-400">
+        Restoring session...
+      </div>
+    );
+  }
 
   if (!user) {
-    return <LoginPage onLogin={(u) => setUser(u)} />;
+    return <LoginPage onLogin={handleLogin} errorMessage={authError} setAuthError={setAuthError} />;
   }
 
   const navItems = [
@@ -47,6 +122,7 @@ export default function App() {
     { id: 'audit', label: 'Audit Trail', icon: ShieldCheck },
     { id: 'rbac', label: 'Access Control', icon: Lock },
   ];
+  const visibleNavItems = navItems.filter(item => user.permissions?.includes(item.id));
 
   return (
     <div className="flex h-screen overflow-hidden bg-zinc-950 text-zinc-100 antialiased selection:bg-cyan-500/30">
@@ -61,7 +137,7 @@ export default function App() {
         </div>
 
         <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
-          {navItems.map((item) => (
+          {visibleNavItems.map((item) => (
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
@@ -88,7 +164,7 @@ export default function App() {
                 <p className="text-[10px] text-zinc-500 truncate">{user.role}</p>
               </div>
             </div>
-            <button onClick={() => setUser(null)}
+            <button onClick={handleSignOut}
               className="w-full mt-2 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800/80 text-zinc-400 hover:text-red-400 text-[10px] transition-colors">
               <LogOut className="h-3 w-3" /> Sign Out
             </button>
@@ -109,18 +185,34 @@ export default function App() {
         <div className="fixed bottom-[-20%] right-[-10%] w-[50%] h-[50%] rounded-full bg-purple-900/10 blur-[120px] pointer-events-none"></div>
         
         <div className="p-10 max-w-7xl mx-auto relative z-10 w-full min-h-full">
+          {liveDataError && (
+            <div className="mb-6 rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {liveDataError}
+            </div>
+          )}
+          {liveDataLoading && liveData.workflows.length === 0 && (
+            <div className="mb-6 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-300">
+              Loading live backend data...
+            </div>
+          )}
           <div key={activeTab} className="animate-fade-in">
             {activeTab === 'dashboard' && <DashboardView data={liveData} />}
-            {activeTab === 'simulator' && <WorkflowSimulator />}
-            {activeTab === 'onboarding' && <OnboardingView />}
+            {activeTab === 'simulator' && (
+              <WorkflowSimulator
+                workflows={liveData.workflows}
+                onAdvanceWorkflow={advanceWorkflow}
+                onRefreshWorkflows={refreshLiveData}
+              />
+            )}
+            {activeTab === 'onboarding' && <OnboardingView token={token} />}
             {activeTab === 'workflows' && <WorkflowsView data={liveData} />}
             {activeTab === 'agents' && <AgentsView data={liveData} />}
-            {activeTab === 'collab' && <AgentCollabGraph />}
-            {activeTab === 'meetings' && <MeetingsView />}
-            {activeTab === 'sla' && <SLAMonitor />}
-            {activeTab === 'chat' && <AgentChat />}
+            {activeTab === 'collab' && <AgentCollabGraph data={liveData} />}
+            {activeTab === 'meetings' && <MeetingsView token={token} />}
+            {activeTab === 'sla' && <SLAMonitor token={token} />}
+            {activeTab === 'chat' && <AgentChat token={token} />}
             {activeTab === 'audit' && <AuditTrailView data={liveData} />}
-            {activeTab === 'rbac' && <RBACView currentUser={user} />}
+            {activeTab === 'rbac' && <RBACView currentUser={user} token={token} />}
           </div>
         </div>
       </main>
@@ -200,7 +292,8 @@ function DashboardView({ data }) {
   );
 }
 
-function MetricCard({ title, value, icon: Icon, colorClass }) {
+function MetricCard({ title, value, icon, colorClass }) {
+  const CardIcon = icon;
   return (
     <div className="glass-panel p-6 rounded-2xl flex items-center justify-between">
       <div>
@@ -208,7 +301,7 @@ function MetricCard({ title, value, icon: Icon, colorClass }) {
         <div className="text-4xl text-white font-bold">{value}</div>
       </div>
       <div className={`p-4 bg-zinc-800/50 rounded-xl ${colorClass}`}>
-        <Icon />
+        <CardIcon />
       </div>
     </div>
   );
