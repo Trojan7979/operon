@@ -65,5 +65,4 @@ Open:
 
 ## Notes
 
-- GitHub renders the root `README.md` on the repository home page.
 - Additional backend implementation detail lives in [backend/README.md](./backend/README.md).
