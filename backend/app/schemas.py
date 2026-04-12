@@ -21,9 +21,26 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str = Field(min_length=8)
+    role: str
+    department: str = "General"
+
+
+class RefreshTokenRequest(BaseModel):
+    refreshToken: str
+
+
+class LogoutRequest(BaseModel):
+    refreshToken: str | None = None
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    refreshToken: str | None = None
     user: UserOut
 
 
@@ -56,6 +73,41 @@ class WorkflowOut(BaseModel):
     steps: list[WorkflowStepOut] = Field(default_factory=list)
 
 
+class WorkflowStepCreate(BaseModel):
+    name: str
+    agent: str
+    status: str = "pending"
+    detail: str | None = None
+
+
+class CreateWorkflowRequest(BaseModel):
+    type: str
+    name: str
+    assignedAgent: str | None = None
+    prediction: str | None = None
+    steps: list[WorkflowStepCreate] = Field(default_factory=list)
+
+
+class UpdateWorkflowRequest(BaseModel):
+    name: str | None = None
+    status: str | None = None
+    health: int | None = Field(default=None, ge=0, le=100)
+    progress: int | None = Field(default=None, ge=0, le=100)
+    currentStep: str | None = None
+    assignedAgent: str | None = None
+    prediction: str | None = None
+    autoAction: str | None = None
+
+
+class RetryWorkflowRequest(BaseModel):
+    note: str | None = None
+
+
+class EscalateWorkflowRequest(BaseModel):
+    note: str = Field(min_length=3, max_length=255)
+    escalateTo: str | None = None
+
+
 class AgentOut(BaseModel):
     id: str
     name: str
@@ -64,6 +116,46 @@ class AgentOut(BaseModel):
     successRate: float
     currentTask: str
     avatar: str
+
+
+class AgentMetricsOut(BaseModel):
+    agentId: str
+    totalRuns: int
+    completedRuns: int
+    failedRuns: int
+    activeTasks: int
+    averageDurationMs: int
+    toolInvocations: int
+    successRate: float
+
+
+class AgentHistoryEntryOut(BaseModel):
+    id: str
+    entryType: str
+    status: str
+    summary: str
+    createdAt: str
+
+
+class AgentTaskOut(BaseModel):
+    id: str
+    title: str
+    description: str
+    status: str
+    priority: str
+    assignedAgentId: str
+    workflowId: str | None = None
+    conversationId: str | None = None
+    createdAt: str
+    updatedAt: str
+
+
+class AssignAgentTaskRequest(BaseModel):
+    title: str
+    description: str
+    priority: str = "normal"
+    workflowId: str | None = None
+    conversationId: str | None = None
 
 
 class AuditLogOut(BaseModel):
@@ -99,6 +191,42 @@ class DashboardOverview(BaseModel):
     workflows: list[WorkflowOut]
     auditLogs: list[AuditLogOut]
     connectedTools: list[ToolConnectionOut]
+
+
+class ConversationMessageOut(BaseModel):
+    id: str
+    role: str
+    senderName: str
+    agentId: str | None = None
+    content: str
+    createdAt: str
+
+
+class ConversationOut(BaseModel):
+    id: str
+    title: str
+    status: str
+    ownerUserId: str
+    primaryAgentId: str | None = None
+    workflowId: str | None = None
+    lastMessageAt: str
+    createdAt: str
+    messages: list[ConversationMessageOut] = Field(default_factory=list)
+
+
+class ChatRequest(BaseModel):
+    agentId: str = "orchestrator"
+    message: str
+    conversationId: str | None = None
+
+
+class ChatResponse(BaseModel):
+    agentId: str
+    conversationId: str
+    message: str
+    invokedTools: list[dict] = Field(default_factory=list)
+    collaboration: list[dict] = Field(default_factory=list)
+    workflowId: str | None = None
 
 
 class MeetingLineOut(BaseModel):
@@ -172,17 +300,6 @@ class WorkflowExecutionResponse(BaseModel):
     newLogs: list[AuditLogOut] = Field(default_factory=list)
 
 
-class ChatRequest(BaseModel):
-    agentId: str
-    message: str
-
-
-class ChatResponse(BaseModel):
-    agentId: str
-    message: str
-    invokedTools: list[dict] = Field(default_factory=list)
-
-
 class LlmProbeRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=240)
     maxOutputTokens: int = Field(default=96, ge=32, le=256)
@@ -243,3 +360,15 @@ class ToolInvokeRequest(BaseModel):
     toolName: str
     action: str
     payload: dict = Field(default_factory=dict)
+
+
+class ToolConnectionActionResponse(BaseModel):
+    tool: ToolConnectionOut
+    message: str
+
+
+class WorkflowAnalyticsOut(BaseModel):
+    total: int
+    byStatus: dict[str, int]
+    avgProgress: int
+    activeWorkflowIds: list[str] = Field(default_factory=list)

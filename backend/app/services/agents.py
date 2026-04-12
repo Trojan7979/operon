@@ -8,7 +8,21 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Agent, AuditLog, Employee, ToolConnection, Workflow, WorkflowStep
+from app.db.models import (
+    Agent,
+    AgentHandoff,
+    AgentRun,
+    AgentTask,
+    AuditLog,
+    Conversation,
+    ConversationMessage,
+    Employee,
+    ToolConnection,
+    ToolInvocation,
+    User,
+    Workflow,
+    WorkflowStep,
+)
 from app.services.vertex import VertexGateway
 
 
@@ -19,6 +33,7 @@ class ToolResult:
     status: str
     summary: str
     payload: dict
+    invocation_id: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -27,6 +42,7 @@ class ToolResult:
             "status": self.status,
             "summary": self.summary,
             "payload": self.payload,
+            "invocationId": self.invocation_id,
         }
 
 
@@ -53,42 +69,91 @@ class OnboardingDraft:
 
 
 class MCPToolRegistry:
-    """A lightweight MCP-style registry that we can later back with real MCP servers."""
+    """Database-backed MCP-style tool registry with persisted invocation history."""
 
     async def list_tools(self, session: AsyncSession) -> list[ToolConnection]:
         result = await session.scalars(select(ToolConnection).order_by(ToolConnection.name))
         return list(result)
 
+    async def get_tool(self, session: AsyncSession, tool_name: str) -> ToolConnection | None:
+        tools = await self.list_tools(session)
+        lowered = tool_name.lower()
+        return next(
+            (item for item in tools if item.name.lower() == lowered or item.id.lower() == lowered),
+            None,
+        )
+
+    async def set_status(self, session: AsyncSession, tool_name: str, status: str) -> ToolConnection | None:
+        tool = await self.get_tool(session, tool_name)
+        if tool is None:
+            return None
+        tool.status = status
+        await session.commit()
+        await session.refresh(tool)
+        return tool
+
     async def invoke(
-        self, session: AsyncSession, tool_name: str, action: str, payload: dict | None = None
+        self,
+        session: AsyncSession,
+        tool_name: str,
+        action: str,
+        payload: dict | None = None,
+        *,
+        conversation_id: str | None = None,
+        workflow_id: str | None = None,
+        agent_run_id: str | None = None,
     ) -> ToolResult:
         payload = payload or {}
-        tools = await self.list_tools(session)
-        tool = next((item for item in tools if item.name.lower() == tool_name.lower()), None)
+        tool = await self.get_tool(session, tool_name)
+
         if tool is None:
-            return ToolResult(
+            result = ToolResult(
                 tool_name=tool_name,
                 action=action,
                 status="not_found",
                 summary="Requested MCP tool is not registered.",
                 payload=payload,
             )
+        else:
+            stamp = datetime.now(UTC).strftime("%H:%M:%S")
+            summary = (
+                f"{tool.name} handled '{action}' via {tool.mcp_server} at {stamp}. "
+                f"Capabilities used: {', '.join(tool.capabilities[:2]) or 'none'}."
+            )
+            result = ToolResult(
+                tool_name=tool.name,
+                action=action,
+                status="ok" if tool.status == "connected" else tool.status,
+                summary=summary,
+                payload=payload,
+            )
 
-        stamp = datetime.now(UTC).strftime("%H:%M:%S")
-        summary = (
-            f"{tool.name} handled '{action}' via {tool.mcp_server} at {stamp}. "
-            f"Capabilities used: {', '.join(tool.capabilities[:2]) or 'none'}."
-        )
-        return ToolResult(
-            tool_name=tool.name,
+        invocation = ToolInvocation(
+            id=f"inv-{uuid4().hex[:10]}",
+            tool_id=tool.id if tool else None,
+            tool_name=result.tool_name,
             action=action,
-            status="ok",
-            summary=summary,
+            status=result.status,
+            summary=result.summary,
             payload=payload,
+            conversation_id=conversation_id,
+            workflow_id=workflow_id,
+            agent_run_id=agent_run_id,
         )
+        session.add(invocation)
+        result.invocation_id = invocation.id
+        return result
 
 
 class AgentCoordinator:
+    alias_map = {
+        "orchestrator": "ag-orchestrator",
+        "intel": "ag-intel",
+        "retrieval": "ag-retrieval",
+        "executor": "ag-executor",
+        "verifier": "ag-verifier",
+    }
+
     def __init__(self) -> None:
         self.tool_registry = MCPToolRegistry()
         self.vertex_gateway = VertexGateway()
@@ -104,161 +169,731 @@ class AgentCoordinator:
         agent_id: str,
         message: str,
         requester_email: str | None = None,
-    ) -> tuple[str, list[dict]]:
-        agent = await self._resolve_agent(session, agent_id)
+        conversation_id: str | None = None,
+    ) -> tuple[str, list[dict], str, list[dict], str | None]:
+        requester = await self._resolve_user(session, requester_email)
+        agent = await self._resolve_agent(session, agent_id or "orchestrator")
+        if agent is None:
+            agent = await self._resolve_agent(session, "orchestrator")
+        if agent is None:
+            raise ValueError("Primary orchestrator agent is not available.")
+
+        conversation = await self._get_or_create_conversation(
+            session,
+            requester=requester,
+            primary_agent=agent,
+            message=message,
+            conversation_id=conversation_id,
+        )
+        await self._append_message(
+            session,
+            conversation=conversation,
+            role="user",
+            sender_name=requester.name if requester else "User",
+            content=message,
+        )
+
+        orchestrator_task = self._create_agent_task(
+            assigned_agent_id=agent.id,
+            title=self._task_title_from_message(message),
+            description=message,
+            priority="high" if any(word in message.lower() for word in ["urgent", "asap"]) else "normal",
+            requested_by_user_id=requester.id if requester else None,
+            conversation_id=conversation.id,
+            workflow_id=conversation.workflow_id,
+        )
+        session.add(orchestrator_task)
+
+        orchestrator_run = self._start_run(
+            agent_id=agent.id,
+            task_id=orchestrator_task.id,
+            conversation_id=conversation.id,
+            workflow_id=conversation.workflow_id,
+            run_type="orchestration",
+            input_summary=message,
+        )
+        session.add(orchestrator_run)
+
         normalized = message.lower()
         tool_calls: list[dict] = []
-        fallback_message = (
-            "I can coordinate workflows, search across connected systems, schedule follow-ups, "
-            "and validate compliance. Share the task and I will route it through the right agents."
-        )
+        collaboration: list[dict] = []
+
         onboarding_intent = any(
             phrase in normalized
             for phrase in ["onboard", "new hire", "hire a new", "create employee", "add employee"]
         )
+        workflow_intent = any(word in normalized for word in ["task", "workflow", "approval", "route"])
+        compliance_intent = any(word in normalized for word in ["compliance", "risk", "audit", "security"])
+        retrieval_intent = any(word in normalized for word in ["find", "fetch", "search", "vendor", "employee"])
+        meeting_intent = any(word in normalized for word in ["meeting", "transcript", "summary"])
+
+        if workflow_intent and conversation.workflow_id is None:
+            workflow = await self._create_request_workflow(session, conversation, message)
+            conversation.workflow_id = workflow.id
+            orchestrator_task.workflow_id = workflow.id
+            orchestrator_run.workflow_id = workflow.id
+        workflow_id = conversation.workflow_id
+
+        fallback_message = (
+            "I can coordinate workflows, search across connected systems, schedule follow-ups, "
+            "and validate compliance. Share the task and I will route it through the right agents."
+        )
 
         if requester_email and (onboarding_intent or requester_email in self.onboarding_drafts):
-            return await self._handle_onboarding(
-                session,
-                agent,
-                requester_email,
-                message,
-                tool_calls,
+            fallback_message, tool_calls, collaboration, workflow_id = await self._handle_onboarding(
+                session=session,
+                requester=requester,
+                conversation=conversation,
+                primary_agent=agent,
+                user_message=message,
+                tool_calls=tool_calls,
+                collaboration=collaboration,
             )
+        elif meeting_intent:
+            specialist_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+                session=session,
+                conversation=conversation,
+                from_agent=agent,
+                to_agent_alias="intel",
+                title="Meeting intelligence",
+                description=message,
+                run_type="analysis",
+                handoff_reason="Extract actions and summarize meeting context.",
+                tool_requests=[("Notes Workspace", "summarize_meeting", {"query": message})],
+            )
+            fallback_message = specialist_response
+            tool_calls.extend(delegated_calls)
+            collaboration.extend(delegated_collaboration)
+        elif workflow_intent:
+            if retrieval_intent:
+                retrieval_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+                    session=session,
+                    conversation=conversation,
+                    from_agent=agent,
+                    to_agent_alias="retrieval",
+                    title="Collect workflow context",
+                    description=message,
+                    run_type="retrieval",
+                    handoff_reason="Gather the context needed before execution.",
+                    tool_requests=[("Knowledge Base", "retrieve_context", {"query": message})],
+                )
+                tool_calls.extend(delegated_calls)
+                collaboration.extend(delegated_collaboration)
+                fallback_message = retrieval_response
 
-        if any(word in normalized for word in ["meeting", "transcript", "summary"]):
-            tool_result = await self.tool_registry.invoke(
-                session,
-                tool_name="Notes Workspace",
-                action="summarize_meeting",
-                payload={"query": message},
+            execution_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+                session=session,
+                conversation=conversation,
+                from_agent=agent,
+                to_agent_alias="executor",
+                title="Route and schedule workflow execution",
+                description=message,
+                run_type="execution",
+                handoff_reason="Coordinate execution and follow-up actions.",
+                tool_requests=[
+                    ("Task Manager", "route_workflow", {"request": message}),
+                    ("Calendar Control", "schedule_follow_up", {"request": message}),
+                ],
             )
-            tool_calls.append(tool_result.as_dict())
-            fallback_message = (
-                "Meeting intelligence complete. I reviewed the transcript context, extracted the "
-                "key decisions and action items, and synced the summary-ready payload."
-            )
-            return await self._compose_response(agent, message, tool_calls, fallback_message)
+            tool_calls.extend(delegated_calls)
+            collaboration.extend(delegated_collaboration)
+            fallback_message = execution_response
 
-        if any(word in normalized for word in ["task", "workflow", "approval", "route"]):
-            task_tool = await self.tool_registry.invoke(
-                session,
-                tool_name="Task Manager",
-                action="route_workflow",
-                payload={"request": message},
+            verifier_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+                session=session,
+                conversation=conversation,
+                from_agent=agent,
+                to_agent_alias="verifier",
+                title="Verify workflow readiness",
+                description=message,
+                run_type="verification",
+                handoff_reason="Confirm the workflow is safe to continue.",
+                tool_requests=[("Compliance Vault", "run_check", {"query": message})],
             )
-            calendar_tool = await self.tool_registry.invoke(
-                session,
-                tool_name="Calendar Control",
-                action="schedule_follow_up",
-                payload={"request": message},
+            tool_calls.extend(delegated_calls)
+            collaboration.extend(delegated_collaboration)
+            fallback_message = verifier_response
+        elif compliance_intent:
+            specialist_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+                session=session,
+                conversation=conversation,
+                from_agent=agent,
+                to_agent_alias="verifier",
+                title="Compliance verification",
+                description=message,
+                run_type="verification",
+                handoff_reason="Run a compliance-oriented pass across the request.",
+                tool_requests=[("Compliance Vault", "run_check", {"query": message})],
             )
-            tool_calls.extend([task_tool.as_dict(), calendar_tool.as_dict()])
-            fallback_message = (
-                "The orchestrator has decomposed the request into routing, follow-up scheduling, "
-                "and execution steps. The appropriate sub-agents and tools are now lined up."
+            fallback_message = specialist_response
+            tool_calls.extend(delegated_calls)
+            collaboration.extend(delegated_collaboration)
+        elif retrieval_intent:
+            specialist_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+                session=session,
+                conversation=conversation,
+                from_agent=agent,
+                to_agent_alias="retrieval",
+                title="Context retrieval",
+                description=message,
+                run_type="retrieval",
+                handoff_reason="Search connected systems for the requested records.",
+                tool_requests=[("Knowledge Base", "retrieve_context", {"query": message})],
             )
-            return await self._compose_response(agent, message, tool_calls, fallback_message)
+            fallback_message = specialist_response
+            tool_calls.extend(delegated_calls)
+            collaboration.extend(delegated_collaboration)
 
-        if any(word in normalized for word in ["compliance", "risk", "audit", "security"]):
-            tool_result = await self.tool_registry.invoke(
-                session,
-                tool_name="Compliance Vault",
-                action="run_check",
-                payload={"query": message},
-            )
-            tool_calls.append(tool_result.as_dict())
-            fallback_message = (
-                "Shield Verifier completed a compliance-oriented pass across the available signals. "
-                "The request has an auditable verification trail now."
-            )
-            return await self._compose_response(agent, message, tool_calls, fallback_message)
+        response_message = await self._compose_response(
+            agent=agent,
+            user_message=message,
+            tool_calls=tool_calls,
+            collaboration=collaboration,
+            fallback_message=fallback_message,
+        )
 
-        if any(word in normalized for word in ["find", "fetch", "search", "vendor", "employee"]):
-            tool_result = await self.tool_registry.invoke(
-                session,
-                tool_name="Knowledge Base",
-                action="retrieve_context",
-                payload={"query": message},
-            )
-            tool_calls.append(tool_result.as_dict())
-            fallback_message = (
-                "Context retrieval is complete. I searched the connected systems and assembled the "
-                "most relevant structured records for the request."
-            )
-            return await self._compose_response(agent, message, tool_calls, fallback_message)
-
-        return await self._compose_response(agent, message, tool_calls, fallback_message)
+        self._complete_run(orchestrator_run, response_message)
+        orchestrator_task.status = "completed"
+        orchestrator_task.result_payload = {
+            "message": response_message,
+            "toolCalls": tool_calls,
+            "collaboration": collaboration,
+        }
+        await self._append_message(
+            session,
+            conversation=conversation,
+            role="assistant",
+            sender_name=agent.name,
+            content=response_message,
+            agent_id=agent.id,
+        )
+        await self._write_audit_log(
+            session,
+            agent_name=agent.name,
+            message=f"Completed collaborative response for conversation {conversation.id}.",
+            log_type="action",
+        )
+        await session.commit()
+        return response_message, tool_calls, conversation.id, collaboration, workflow_id
 
     async def _handle_onboarding(
         self,
+        *,
         session: AsyncSession,
-        agent: Agent | None,
-        requester_email: str,
+        requester: User | None,
+        conversation: Conversation,
+        primary_agent: Agent,
         user_message: str,
         tool_calls: list[dict],
-    ) -> tuple[str, list[dict]]:
+        collaboration: list[dict],
+    ) -> tuple[str, list[dict], list[dict], str | None]:
+        requester_key = requester.email if requester else conversation.id
         normalized = user_message.strip().lower()
         if normalized in {"cancel", "cancel onboarding", "stop", "never mind"}:
-            self.onboarding_drafts.pop(requester_email, None)
+            self.onboarding_drafts.pop(requester_key, None)
             return (
                 "Onboarding draft cleared. If you want to start again, just tell me to onboard a new employee.",
                 tool_calls,
+                collaboration,
+                conversation.workflow_id,
             )
 
-        draft = self.onboarding_drafts.get(requester_email) or OnboardingDraft()
+        draft = self.onboarding_drafts.get(requester_key) or OnboardingDraft()
         self._update_onboarding_draft(draft, user_message)
-
         missing_fields = draft.missing_fields()
         if missing_fields:
             next_field = missing_fields[0]
             draft.requested_field = next_field
-            self.onboarding_drafts[requester_email] = draft
-            fallback_message = self._build_onboarding_question(draft, next_field)
-            return await self._compose_response(agent, user_message, tool_calls, fallback_message)
+            self.onboarding_drafts[requester_key] = draft
+            return (
+                self._build_onboarding_question(draft, next_field),
+                tool_calls,
+                collaboration,
+                conversation.workflow_id,
+            )
 
-        existing_employee = await session.scalar(
-            select(Employee).where(Employee.email == draft.email)
-        )
+        existing_employee = await session.scalar(select(Employee).where(Employee.email == draft.email))
         if existing_employee is not None:
             draft.email = None
             draft.requested_field = "email"
-            self.onboarding_drafts[requester_email] = draft
-            fallback_message = (
-                f"I already found an employee record with {existing_employee.email}. "
-                "Please share a different work email for the new hire."
+            self.onboarding_drafts[requester_key] = draft
+            return (
+                f"I already found an employee record with {existing_employee.email}. Please share a different work email for the new hire.",
+                tool_calls,
+                collaboration,
+                conversation.workflow_id,
             )
-            return await self._compose_response(agent, user_message, tool_calls, fallback_message)
 
-        employee = await self._create_onboarding_employee(session, draft)
-        task_tool = await self.tool_registry.invoke(
-            session,
-            tool_name="Task Manager",
-            action="create_task",
-            payload={
-                "workflow": "employee_onboarding",
-                "employee": employee.name,
-                "department": employee.department,
-            },
+        employee, workflow = await self._create_onboarding_employee(session, draft)
+        conversation.workflow_id = workflow.id
+        self.onboarding_drafts.pop(requester_key, None)
+
+        verifier_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+            session=session,
+            conversation=conversation,
+            from_agent=primary_agent,
+            to_agent_alias="verifier",
+            title="Verify onboarding package",
+            description=f"Validate onboarding readiness for {employee.name}.",
+            run_type="verification",
+            handoff_reason="Confirm identity and policy readiness before employee start.",
+            tool_requests=[("Compliance Vault", "run_check", {"employee": employee.email})],
         )
-        calendar_tool = await self.tool_registry.invoke(
-            session,
-            tool_name="Calendar Control",
-            action="create_event",
-            payload={
-                "employee": employee.name,
-                "event": "Day 1 orientation",
-                "startDate": draft.start_date,
-            },
+        tool_calls.extend(delegated_calls)
+        collaboration.extend(delegated_collaboration)
+
+        execution_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+            session=session,
+            conversation=conversation,
+            from_agent=primary_agent,
+            to_agent_alias="executor",
+            title="Execute onboarding setup",
+            description=f"Finalize onboarding tasks for {employee.name}.",
+            run_type="execution",
+            handoff_reason="Create orientation and setup tasks for the new employee.",
+            tool_requests=[
+                (
+                    "Task Manager",
+                    "create_task",
+                    {
+                        "workflow": "employee_onboarding",
+                        "employee": employee.name,
+                        "department": employee.department,
+                    },
+                ),
+                (
+                    "Calendar Control",
+                    "create_event",
+                    {
+                        "employee": employee.name,
+                        "event": "Day 1 orientation",
+                        "startDate": draft.start_date,
+                    },
+                ),
+            ],
         )
-        tool_calls.extend([task_tool.as_dict(), calendar_tool.as_dict()])
-        self.onboarding_drafts.pop(requester_email, None)
+        tool_calls.extend(delegated_calls)
+        collaboration.extend(delegated_collaboration)
 
         fallback_message = (
-            f"Onboarding is underway for {employee.name}. I registered the work email {employee.email}, "
-            f"assigned the role {employee.role} in {employee.department}, and queued the Day 1 setup for {draft.start_date}."
+            f"Onboarding is underway for {employee.name}. I registered {employee.email}, assigned {employee.role} in {employee.department}, "
+            f"and coordinated verification plus Day 1 setup for {draft.start_date}. {verifier_response} {execution_response}"
         )
-        return await self._compose_response(agent, user_message, tool_calls, fallback_message)
+        return fallback_message, tool_calls, collaboration, workflow.id
+
+    async def _delegate_to_agent(
+        self,
+        *,
+        session: AsyncSession,
+        conversation: Conversation,
+        from_agent: Agent,
+        to_agent_alias: str,
+        title: str,
+        description: str,
+        run_type: str,
+        handoff_reason: str,
+        tool_requests: list[tuple[str, str, dict]],
+    ) -> tuple[str, list[dict], list[dict]]:
+        to_agent = await self._resolve_agent(session, to_agent_alias)
+        if to_agent is None:
+            return "The requested specialist agent is unavailable right now.", [], []
+
+        task = self._create_agent_task(
+            assigned_agent_id=to_agent.id,
+            title=title,
+            description=description,
+            priority="normal",
+            conversation_id=conversation.id,
+            workflow_id=conversation.workflow_id,
+        )
+        session.add(task)
+
+        handoff = AgentHandoff(
+            id=f"handoff-{uuid4().hex[:10]}",
+            from_agent_id=from_agent.id,
+            to_agent_id=to_agent.id,
+            task_id=task.id,
+            conversation_id=conversation.id,
+            workflow_id=conversation.workflow_id,
+            reason=handoff_reason,
+            status="accepted",
+        )
+        session.add(handoff)
+
+        run = self._start_run(
+            agent_id=to_agent.id,
+            task_id=task.id,
+            conversation_id=conversation.id,
+            workflow_id=conversation.workflow_id,
+            run_type=run_type,
+            input_summary=description,
+        )
+        session.add(run)
+
+        tool_calls: list[dict] = []
+        for tool_name, action, payload in tool_requests:
+            result = await self.tool_registry.invoke(
+                session,
+                tool_name=tool_name,
+                action=action,
+                payload=payload,
+                conversation_id=conversation.id,
+                workflow_id=conversation.workflow_id,
+                agent_run_id=run.id,
+            )
+            tool_calls.append(result.as_dict())
+
+        summary = self._build_specialist_summary(to_agent.name, tool_calls)
+        task.status = "completed"
+        task.result_payload = {"toolCalls": tool_calls, "summary": summary}
+        self._complete_run(run, summary)
+        await self._write_audit_log(
+            session,
+            agent_name=to_agent.name,
+            message=summary,
+            log_type="event",
+        )
+
+        collaboration = [
+            {
+                "handoffId": handoff.id,
+                "fromAgentId": from_agent.id,
+                "toAgentId": to_agent.id,
+                "taskId": task.id,
+                "status": handoff.status,
+                "reason": handoff.reason,
+            }
+        ]
+        return summary, tool_calls, collaboration
+
+    async def _resolve_user(self, session: AsyncSession, requester_email: str | None) -> User | None:
+        if not requester_email:
+            return None
+        return await session.scalar(select(User).where(User.email == requester_email))
+
+    async def _get_or_create_conversation(
+        self,
+        session: AsyncSession,
+        *,
+        requester: User | None,
+        primary_agent: Agent,
+        message: str,
+        conversation_id: str | None,
+    ) -> Conversation:
+        if conversation_id:
+            conversation = await session.get(Conversation, conversation_id)
+            if conversation:
+                conversation.last_message_at = datetime.now(UTC)
+                return conversation
+
+        owner_user_id = requester.id if requester else "u-system"
+        conversation = Conversation(
+            id=f"conv-{uuid4().hex[:8]}",
+            title=self._conversation_title_from_message(message),
+            status="active",
+            owner_user_id=owner_user_id,
+            primary_agent_id=primary_agent.id,
+            workflow_id=None,
+            last_message_at=datetime.now(UTC),
+            created_at=datetime.now(UTC),
+        )
+        session.add(conversation)
+        return conversation
+
+    async def _append_message(
+        self,
+        session: AsyncSession,
+        *,
+        conversation: Conversation,
+        role: str,
+        sender_name: str,
+        content: str,
+        agent_id: str | None = None,
+    ) -> None:
+        conversation.last_message_at = datetime.now(UTC)
+        session.add(
+            ConversationMessage(
+                id=f"msg-{uuid4().hex[:10]}",
+                conversation_id=conversation.id,
+                role=role,
+                sender_name=sender_name,
+                agent_id=agent_id,
+                content=content,
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    async def _create_request_workflow(
+        self,
+        session: AsyncSession,
+        conversation: Conversation,
+        message: str,
+    ) -> Workflow:
+        workflow = Workflow(
+            id=f"wf-{uuid4().hex[:6]}",
+            workflow_type="Task Coordination",
+            name=self._conversation_title_from_message(message),
+            status="in-progress",
+            health=95,
+            progress=25,
+            current_step="Context Retrieval",
+            assigned_agent="Data Fetcher v4",
+            prediction="Expected to complete autonomously if tool calls succeed.",
+        )
+        session.add(workflow)
+
+        steps = [
+            ("Context Retrieval", "Data Fetcher v4", "in-progress"),
+            ("Execution Routing", "Action Exec Alpha", "pending"),
+            ("Verification", "Shield Verifier", "pending"),
+        ]
+        for index, (name, assigned_agent, status) in enumerate(steps, start=1):
+            session.add(
+                WorkflowStep(
+                    workflow_id=workflow.id,
+                    position=index,
+                    name=name,
+                    agent=assigned_agent,
+                    status=status,
+                    time_label="-",
+                )
+            )
+        await self._write_audit_log(
+            session,
+            agent_name="Nexus Orchestrator",
+            message=f"Created workflow {workflow.id} from conversation {conversation.id}.",
+            log_type="info",
+        )
+        return workflow
+
+    async def _create_onboarding_employee(
+        self,
+        session: AsyncSession,
+        draft: OnboardingDraft,
+    ) -> tuple[Employee, Workflow]:
+        employee = Employee(
+            id=f"emp-{uuid4().hex[:8]}",
+            name=draft.name or "Unknown Employee",
+            role=draft.role or "Employee",
+            department=draft.department or "General",
+            email=draft.email or f"user-{uuid4().hex[:6]}@nexuscore.ai",
+            phone=draft.phone,
+            location=draft.location,
+            start_date_label=draft.start_date or "TBD",
+            status="onboarding",
+            progress=100,
+            avatar="".join(part[0] for part in (draft.name or "UE").split()[:2]).upper(),
+            photo_url=None,
+        )
+        session.add(employee)
+
+        workflow = Workflow(
+            id=f"wf-{uuid4().hex[:6]}",
+            workflow_type="Employee Onboarding",
+            name=f"{employee.name} ({employee.department})",
+            status="completed",
+            health=100,
+            progress=100,
+            current_step="Onboarding Complete",
+            assigned_agent="Shield Verifier",
+            prediction="Automated onboarding completed successfully.",
+        )
+        session.add(workflow)
+
+        steps = [
+            ("Identity Verification", "Shield Verifier"),
+            ("Background Check Initiated", "Data Fetcher v4"),
+            ("Workspace Provisioning", "Action Exec Alpha"),
+            ("Hardware Request Submitted", "Nexus Orchestrator"),
+            ("Day 1 Calendar Created", "Action Exec Alpha"),
+            ("Onboarding Complete", "Shield Verifier"),
+        ]
+        for index, (name, assigned_agent) in enumerate(steps, start=1):
+            session.add(
+                WorkflowStep(
+                    workflow_id=workflow.id,
+                    position=index,
+                    name=name,
+                    agent=assigned_agent,
+                    status="completed",
+                    time_label="auto",
+                )
+            )
+
+        await self._write_audit_log(
+            session,
+            agent_name="Nexus Orchestrator",
+            message=f"Completed onboarding workflow for {employee.name}.",
+            log_type="action",
+        )
+        return employee, workflow
+
+    async def _resolve_agent(self, session: AsyncSession, agent_id: str) -> Agent | None:
+        canonical_id = self.alias_map.get(agent_id, agent_id)
+        if canonical_id.startswith("ag-"):
+            return await session.get(Agent, canonical_id)
+
+        agents = await self.get_agents(session)
+        normalized_target = agent_id.lower().replace("-", " ")
+        return next(
+            (
+                item
+                for item in agents
+                if normalized_target in item.name.lower()
+                or normalized_target in item.role.lower()
+            ),
+            None,
+        )
+
+    async def _compose_response(
+        self,
+        *,
+        agent: Agent,
+        user_message: str,
+        tool_calls: list[dict],
+        collaboration: list[dict],
+        fallback_message: str,
+    ) -> str:
+        if not self.vertex_gateway.enabled:
+            return fallback_message
+
+        tool_summaries = [tool["summary"] for tool in tool_calls if tool.get("summary")]
+        prompt = self._build_prompt(agent, user_message, tool_summaries, collaboration, fallback_message)
+        try:
+            result = await self.vertex_gateway.generate_text(
+                prompt,
+                max_output_tokens=220,
+                temperature=0.25,
+            )
+            message = result.get("text", "").strip()
+            if message:
+                return message
+        except RuntimeError:
+            pass
+        return fallback_message
+
+    @staticmethod
+    def _build_prompt(
+        agent: Agent,
+        user_message: str,
+        tool_summaries: list[str],
+        collaboration: list[dict],
+        fallback_message: str,
+    ) -> str:
+        tools_section = "\n".join(f"- {summary}" for summary in tool_summaries) or "- No tools were invoked."
+        collaboration_section = (
+            "\n".join(
+                f"- {entry['fromAgentId']} delegated to {entry['toAgentId']} because {entry['reason']}"
+                for entry in collaboration
+            )
+            or "- No specialist handoffs were needed."
+        )
+        return (
+            f"You are {agent.name}, a {agent.role} inside the NexusCore multi-agent platform.\n"
+            "Respond as an enterprise agent assistant in 2-4 short sentences.\n"
+            "Ground the answer in the supplied tool outcomes and agent collaboration trail.\n"
+            "Do not invent data, IDs, or completed actions beyond the provided context.\n\n"
+            f"Current task: {agent.current_task}\n"
+            f"User request: {user_message}\n"
+            f"Collaboration:\n{collaboration_section}\n"
+            f"Tool outcomes:\n{tools_section}\n\n"
+            f"If the tool outcomes are insufficient, fall back to this safe response:\n{fallback_message}"
+        )
+
+    @staticmethod
+    def _task_title_from_message(message: str) -> str:
+        trimmed = " ".join(message.strip().split())
+        return trimmed[:80] or "Agent task"
+
+    @staticmethod
+    def _conversation_title_from_message(message: str) -> str:
+        trimmed = " ".join(message.strip().split())
+        return trimmed[:60] or "New conversation"
+
+    @staticmethod
+    def _create_agent_task(
+        *,
+        assigned_agent_id: str,
+        title: str,
+        description: str,
+        priority: str,
+        requested_by_user_id: str | None = None,
+        conversation_id: str | None = None,
+        workflow_id: str | None = None,
+    ) -> AgentTask:
+        return AgentTask(
+            id=f"task-{uuid4().hex[:8]}",
+            title=title,
+            description=description,
+            status="in-progress",
+            priority=priority,
+            assigned_agent_id=assigned_agent_id,
+            requested_by_user_id=requested_by_user_id,
+            conversation_id=conversation_id,
+            workflow_id=workflow_id,
+            input_payload={"description": description},
+            result_payload={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+    @staticmethod
+    def _start_run(
+        *,
+        agent_id: str,
+        task_id: str | None,
+        conversation_id: str | None,
+        workflow_id: str | None,
+        run_type: str,
+        input_summary: str,
+    ) -> AgentRun:
+        return AgentRun(
+            id=f"run-{uuid4().hex[:8]}",
+            agent_id=agent_id,
+            task_id=task_id,
+            conversation_id=conversation_id,
+            workflow_id=workflow_id,
+            status="running",
+            run_type=run_type,
+            input_summary=input_summary,
+            started_at=datetime.now(UTC),
+        )
+
+    @staticmethod
+    def _complete_run(run: AgentRun, output_summary: str, status: str = "completed") -> None:
+        completed_at = datetime.now(UTC)
+        run.status = status
+        run.output_summary = output_summary
+        run.completed_at = completed_at
+        run.duration_ms = max(
+            int((completed_at - run.started_at).total_seconds() * 1000),
+            1,
+        )
+
+    @staticmethod
+    def _build_specialist_summary(agent_name: str, tool_calls: list[dict]) -> str:
+        if not tool_calls:
+            return f"{agent_name} reviewed the request and did not need any tool calls."
+        tool_bits = ", ".join(f"{tool['toolName']}:{tool['action']}" for tool in tool_calls)
+        return f"{agent_name} completed its specialist pass using {tool_bits}."
+
+    async def _write_audit_log(
+        self,
+        session: AsyncSession,
+        *,
+        agent_name: str,
+        message: str,
+        log_type: str,
+    ) -> None:
+        session.add(
+            AuditLog(
+                id=f"log-{uuid4().hex[:10]}",
+                time_label=datetime.now(UTC).strftime("%H:%M:%S"),
+                log_type=log_type,
+                agent=agent_name,
+                message=message,
+            )
+        )
 
     def _update_onboarding_draft(self, draft: OnboardingDraft, message: str) -> None:
         message = message.strip()
@@ -340,9 +975,7 @@ class AgentCoordinator:
         if draft.start_date:
             collected.append(f"start date: {draft.start_date}")
         collected_line = (
-            f"Collected so far - {', '.join(collected)}."
-            if collected
-            else "I can set this up for you."
+            f"Collected so far - {', '.join(collected)}." if collected else "I can set this up for you."
         )
 
         prompts = {
@@ -353,146 +986,3 @@ class AgentCoordinator:
             "start_date": "What is the employee's start date?",
         }
         return f"{collected_line} {prompts[field_name]}"
-
-    async def _create_onboarding_employee(
-        self,
-        session: AsyncSession,
-        draft: OnboardingDraft,
-    ) -> Employee:
-        employee = Employee(
-            id=f"emp-{uuid4().hex[:8]}",
-            name=draft.name or "Unknown Employee",
-            role=draft.role or "Employee",
-            department=draft.department or "General",
-            email=draft.email or f"user-{uuid4().hex[:6]}@nexuscore.ai",
-            phone=draft.phone,
-            location=draft.location,
-            start_date_label=draft.start_date or "TBD",
-            status="onboarding",
-            progress=100,
-            avatar="".join(part[0] for part in (draft.name or "UE").split()[:2]).upper(),
-            photo_url=None,
-        )
-        session.add(employee)
-
-        workflow = Workflow(
-            id=f"wf-{uuid4().hex[:6]}",
-            workflow_type="Employee Onboarding",
-            name=f"{employee.name} ({employee.department})",
-            status="completed",
-            health=100,
-            progress=100,
-            current_step="Onboarding Complete",
-            assigned_agent="Shield Verifier",
-            prediction="Automated onboarding completed successfully.",
-        )
-        session.add(workflow)
-
-        steps = [
-            ("Identity Verification", "Shield Verifier"),
-            ("Background Check Initiated", "Data Fetcher v4"),
-            ("Workspace Provisioning", "Action Exec Alpha"),
-            ("Hardware Request Submitted", "Nexus Orchestrator"),
-            ("Day 1 Calendar Created", "Action Exec Alpha"),
-            ("Onboarding Complete", "Shield Verifier"),
-        ]
-        for index, (name, assigned_agent) in enumerate(steps, start=1):
-            session.add(
-                WorkflowStep(
-                    workflow_id=workflow.id,
-                    position=index,
-                    name=name,
-                    agent=assigned_agent,
-                    status="completed",
-                    time_label="auto",
-                )
-            )
-
-        session.add(
-            AuditLog(
-                id=f"log-{uuid4().hex[:10]}",
-                time_label="auto",
-                log_type="action",
-                agent="Nexus Orchestrator",
-                message=f"Completed onboarding workflow for {employee.name}.",
-            )
-        )
-
-        await session.commit()
-        await session.refresh(employee)
-        return employee
-
-    async def _resolve_agent(self, session: AsyncSession, agent_id: str) -> Agent | None:
-        alias_map = {
-            "orchestrator": "ag-orchestrator",
-            "intel": "ag-intel",
-            "retrieval": "ag-retrieval",
-            "executor": "ag-executor",
-            "verifier": "ag-verifier",
-        }
-        canonical_id = alias_map.get(agent_id, agent_id)
-        if canonical_id.startswith("ag-"):
-            return await session.get(Agent, canonical_id)
-
-        agents = await self.get_agents(session)
-        normalized_target = agent_id.lower().replace("-", " ")
-        return next(
-            (
-                item
-                for item in agents
-                if normalized_target in item.name.lower()
-                or normalized_target in item.role.lower()
-            ),
-            None,
-        )
-
-    async def _compose_response(
-        self,
-        agent: Agent | None,
-        user_message: str,
-        tool_calls: list[dict],
-        fallback_message: str,
-    ) -> tuple[str, list[dict]]:
-        if not self.vertex_gateway.enabled:
-            return fallback_message, tool_calls
-
-        tool_summaries = [tool["summary"] for tool in tool_calls if tool.get("summary")]
-        prompt = self._build_prompt(agent, user_message, tool_summaries, fallback_message)
-
-        try:
-            result = await self.vertex_gateway.generate_text(
-                prompt,
-                max_output_tokens=180,
-                temperature=0.25,
-            )
-            message = result.get("text", "").strip()
-            if message:
-                return message, tool_calls
-        except RuntimeError:
-            pass
-
-        return fallback_message, tool_calls
-
-    @staticmethod
-    def _build_prompt(
-        agent: Agent | None,
-        user_message: str,
-        tool_summaries: list[str],
-        fallback_message: str,
-    ) -> str:
-        agent_name = agent.name if agent else "Nexus Agent"
-        agent_role = agent.role if agent else "Multi-agent assistant"
-        current_task = agent.current_task if agent else "No current task available."
-        tools_section = "\n".join(f"- {summary}" for summary in tool_summaries) or "- No tools were invoked."
-
-        return (
-            f"You are {agent_name}, a {agent_role} inside the NexusCore multi-agent platform.\n"
-            "Respond as an enterprise agent assistant in 2-4 short sentences.\n"
-            "Ground the answer in the supplied tool outcomes and current task.\n"
-            "Do not invent data, IDs, or completed actions beyond the provided context.\n"
-            "If tools were invoked, mention the operational outcome clearly.\n\n"
-            f"Current task: {current_task}\n"
-            f"User request: {user_message}\n"
-            f"Tool outcomes:\n{tools_section}\n\n"
-            f"If the tool outcomes are insufficient, fall back to this safe response:\n{fallback_message}"
-        )

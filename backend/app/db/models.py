@@ -105,6 +105,97 @@ class WorkflowStep(Base):
     workflow: Mapped["Workflow"] = relationship(back_populates="steps")
 
 
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    primary_agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id"), nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column(ForeignKey("workflows.id"), nullable=True)
+    last_message_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), index=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    sender_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id"), nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
+class AgentTask(Base):
+    __tablename__ = "agent_tasks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    priority: Mapped[str] = mapped_column(String(16), default="normal")
+    assigned_agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
+    requested_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id"), nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column(ForeignKey("workflows.id"), nullable=True)
+    input_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("agent_tasks.id"), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id"), nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column(ForeignKey("workflows.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    run_type: Mapped[str] = mapped_column(String(64), default="task")
+    input_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    output_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class AgentHandoff(Base):
+    __tablename__ = "agent_handoffs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    from_agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id"), nullable=True)
+    to_agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("agent_tasks.id"), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id"), nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column(ForeignKey("workflows.id"), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="created")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
@@ -230,3 +321,38 @@ class ToolConnection(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     mcp_server: Mapped[str] = mapped_column(String(120), nullable=False)
     capabilities: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+class ToolInvocation(Base):
+    __tablename__ = "tool_invocations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tool_id: Mapped[str | None] = mapped_column(ForeignKey("tool_connections.id"), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    action: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id"), nullable=True)
+    workflow_id: Mapped[str | None] = mapped_column(ForeignKey("workflows.id"), nullable=True)
+    agent_run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    refresh_token_hash: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

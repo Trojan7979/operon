@@ -1,12 +1,17 @@
 from app.db.models import (
     Agent,
+    AgentRun,
+    AgentTask,
     AuditLog,
     Bottleneck,
+    Conversation,
+    ConversationMessage,
     Employee,
     Meeting,
     MeetingItem,
     SlaRecord,
     SystemMetric,
+    ToolInvocation,
     ToolConnection,
     User,
     Workflow,
@@ -149,6 +154,61 @@ def serialize_agent(agent: Agent) -> dict:
     }
 
 
+def serialize_agent_task(task: AgentTask) -> dict:
+    return {
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "status": task.status,
+        "priority": task.priority,
+        "assignedAgentId": task.assigned_agent_id,
+        "workflowId": task.workflow_id,
+        "conversationId": task.conversation_id,
+        "createdAt": task.created_at.isoformat(),
+        "updatedAt": task.updated_at.isoformat(),
+    }
+
+
+def serialize_agent_metrics(
+    agent: Agent,
+    *,
+    total_runs: int,
+    completed_runs: int,
+    failed_runs: int,
+    active_tasks: int,
+    average_duration_ms: int,
+    tool_invocations: int,
+) -> dict:
+    success_rate = round((completed_runs / total_runs) * 100, 1) if total_runs else agent.success_rate
+    return {
+        "agentId": agent.id,
+        "totalRuns": total_runs,
+        "completedRuns": completed_runs,
+        "failedRuns": failed_runs,
+        "activeTasks": active_tasks,
+        "averageDurationMs": average_duration_ms,
+        "toolInvocations": tool_invocations,
+        "successRate": success_rate,
+    }
+
+
+def serialize_agent_history_entry(
+    *,
+    entry_id: str,
+    entry_type: str,
+    status: str,
+    summary: str,
+    created_at,
+) -> dict:
+    return {
+        "id": entry_id,
+        "entryType": entry_type,
+        "status": status,
+        "summary": summary,
+        "createdAt": created_at.isoformat(),
+    }
+
+
 def serialize_workflow_step(step: WorkflowStep) -> dict:
     enrichment = DEMO_STEP_ENRICHMENTS.get((step.workflow_id, step.position), {})
     failure_scenario = build_failure_scenario(step)
@@ -197,6 +257,31 @@ def serialize_audit_log(log: AuditLog) -> dict:
         "type": log.log_type,
         "agent": log.agent,
         "message": log.message,
+    }
+
+
+def serialize_conversation_message(message: ConversationMessage) -> dict:
+    return {
+        "id": message.id,
+        "role": message.role,
+        "senderName": message.sender_name,
+        "agentId": message.agent_id,
+        "content": message.content,
+        "createdAt": message.created_at.isoformat(),
+    }
+
+
+def serialize_conversation(conversation: Conversation, messages: list[ConversationMessage] | None = None) -> dict:
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "status": conversation.status,
+        "ownerUserId": conversation.owner_user_id,
+        "primaryAgentId": conversation.primary_agent_id,
+        "workflowId": conversation.workflow_id,
+        "lastMessageAt": conversation.last_message_at.isoformat(),
+        "createdAt": conversation.created_at.isoformat(),
+        "messages": [serialize_conversation_message(message) for message in messages or []],
     }
 
 
@@ -283,4 +368,16 @@ def serialize_tool(tool: ToolConnection) -> dict:
         "status": tool.status,
         "mcpServer": tool.mcp_server,
         "capabilities": tool.capabilities,
+    }
+
+
+def serialize_tool_invocation(invocation: ToolInvocation) -> dict:
+    return {
+        "id": invocation.id,
+        "toolName": invocation.tool_name,
+        "action": invocation.action,
+        "status": invocation.status,
+        "summary": invocation.summary,
+        "payload": invocation.payload,
+        "createdAt": invocation.created_at.isoformat(),
     }

@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_password_hash
 from app.db.models import (
     Agent,
+    AgentHandoff,
+    AgentRun,
+    AgentTask,
+    AuthSession,
     AuditLog,
     Bottleneck,
+    Conversation,
+    ConversationMessage,
     Employee,
     Meeting,
     MeetingItem,
     SlaRecord,
     SystemMetric,
+    ToolInvocation,
     ToolConnection,
     TranscriptLine,
     User,
@@ -66,6 +75,7 @@ ROLE_TEMPLATES = {
 async def seed_database(session: AsyncSession) -> None:
     existing_user = await session.scalar(select(User.id).limit(1))
     if existing_user:
+        await seed_phase1_extensions(session)
         return
 
     session.add(
@@ -462,5 +472,241 @@ async def seed_database(session: AsyncSession) -> None:
                 capabilities=capabilities,
             )
         )
+
+    await session.commit()
+    await seed_phase1_extensions(session)
+
+
+async def seed_phase1_extensions(session: AsyncSession) -> None:
+    existing_conversation = await session.scalar(select(Conversation.id).limit(1))
+    if existing_conversation:
+        return
+
+    conversations = [
+        Conversation(
+            id="conv-001",
+            title="Vendor onboarding escalation",
+            status="active",
+            owner_user_id="u-2",
+            primary_agent_id="ag-orchestrator",
+            workflow_id="wf-901",
+        ),
+        Conversation(
+            id="conv-002",
+            title="Employee onboarding coordination",
+            status="active",
+            owner_user_id="u-6",
+            primary_agent_id="ag-orchestrator",
+            workflow_id="wf-902",
+        ),
+    ]
+    session.add_all(conversations)
+
+    messages = [
+        ConversationMessage(
+            id="msg-001",
+            conversation_id="conv-001",
+            role="user",
+            sender_name="Sarah Chen",
+            content="Please verify Acme Corp and move the purchase request forward today.",
+        ),
+        ConversationMessage(
+            id="msg-002",
+            conversation_id="conv-001",
+            role="assistant",
+            sender_name="Nexus Orchestrator",
+            agent_id="ag-orchestrator",
+            content="I delegated vendor verification to Data Fetcher and queued the approval path with Shield Verifier.",
+        ),
+        ConversationMessage(
+            id="msg-003",
+            conversation_id="conv-002",
+            role="user",
+            sender_name="Maria Lopez",
+            content="Onboard Priya Nair as a Software Engineer in Engineering starting Apr 20, 2026.",
+        ),
+        ConversationMessage(
+            id="msg-004",
+            conversation_id="conv-002",
+            role="assistant",
+            sender_name="Nexus Orchestrator",
+            agent_id="ag-orchestrator",
+            content="Identity, provisioning, and orientation setup have been split across the specialist agents.",
+        ),
+    ]
+    session.add_all(messages)
+
+    tasks = [
+        AgentTask(
+            id="task-001",
+            title="Vendor verification",
+            description="Validate the Acme Corp vendor profile and return readiness for approval.",
+            status="completed",
+            priority="high",
+            assigned_agent_id="ag-retrieval",
+            requested_by_user_id="u-2",
+            conversation_id="conv-001",
+            workflow_id="wf-901",
+            input_payload={"vendor": "Acme Corp"},
+            result_payload={"result": "vendor verified"},
+        ),
+        AgentTask(
+            id="task-002",
+            title="Compliance review",
+            description="Run a compliance pass over the procurement package and identify missing artifacts.",
+            status="completed",
+            priority="high",
+            assigned_agent_id="ag-verifier",
+            requested_by_user_id="u-2",
+            conversation_id="conv-001",
+            workflow_id="wf-901",
+            input_payload={"workflowId": "wf-901"},
+            result_payload={"result": "missing W-9 signature"},
+        ),
+        AgentTask(
+            id="task-003",
+            title="Orientation scheduling",
+            description="Create the Day 1 orientation event and notify the new employee.",
+            status="completed",
+            priority="normal",
+            assigned_agent_id="ag-executor",
+            requested_by_user_id="u-6",
+            conversation_id="conv-002",
+            workflow_id="wf-902",
+            input_payload={"employee": "Priya Nair"},
+            result_payload={"result": "calendar event scheduled"},
+        ),
+    ]
+    session.add_all(tasks)
+
+    runs = [
+        AgentRun(
+            id="run-001",
+            agent_id="ag-orchestrator",
+            task_id="task-001",
+            conversation_id="conv-001",
+            workflow_id="wf-901",
+            status="completed",
+            run_type="orchestration",
+            input_summary="Route the procurement request to the right specialist agent.",
+            output_summary="Assigned vendor verification to Data Fetcher v4.",
+            duration_ms=900,
+            completed_at=datetime.now(UTC),
+        ),
+        AgentRun(
+            id="run-002",
+            agent_id="ag-retrieval",
+            task_id="task-001",
+            conversation_id="conv-001",
+            workflow_id="wf-901",
+            status="completed",
+            run_type="retrieval",
+            input_summary="Fetch vendor records for Acme Corp.",
+            output_summary="Vendor profile confirmed in the knowledge base.",
+            duration_ms=1600,
+            completed_at=datetime.now(UTC),
+        ),
+        AgentRun(
+            id="run-003",
+            agent_id="ag-verifier",
+            task_id="task-002",
+            conversation_id="conv-001",
+            workflow_id="wf-901",
+            status="completed",
+            run_type="verification",
+            input_summary="Check procurement packet for compliance gaps.",
+            output_summary="Detected and logged a missing W-9 signature.",
+            duration_ms=2100,
+            completed_at=datetime.now(UTC),
+        ),
+        AgentRun(
+            id="run-004",
+            agent_id="ag-executor",
+            task_id="task-003",
+            conversation_id="conv-002",
+            workflow_id="wf-902",
+            status="completed",
+            run_type="execution",
+            input_summary="Schedule Day 1 orientation for Priya Nair.",
+            output_summary="Orientation event created and noted in the workflow.",
+            duration_ms=1750,
+            completed_at=datetime.now(UTC),
+        ),
+    ]
+    session.add_all(runs)
+
+    handoffs = [
+        AgentHandoff(
+            id="handoff-001",
+            from_agent_id="ag-orchestrator",
+            to_agent_id="ag-retrieval",
+            task_id="task-001",
+            conversation_id="conv-001",
+            workflow_id="wf-901",
+            reason="Retrieve vendor context before approval routing.",
+            status="accepted",
+        ),
+        AgentHandoff(
+            id="handoff-002",
+            from_agent_id="ag-orchestrator",
+            to_agent_id="ag-verifier",
+            task_id="task-002",
+            conversation_id="conv-001",
+            workflow_id="wf-901",
+            reason="Validate compliance posture before payment execution.",
+            status="accepted",
+        ),
+        AgentHandoff(
+            id="handoff-003",
+            from_agent_id="ag-orchestrator",
+            to_agent_id="ag-executor",
+            task_id="task-003",
+            conversation_id="conv-002",
+            workflow_id="wf-902",
+            reason="Complete the final scheduling step for onboarding.",
+            status="accepted",
+        ),
+    ]
+    session.add_all(handoffs)
+
+    invocations = [
+        ToolInvocation(
+            id="inv-001",
+            tool_id="tool-knowledge",
+            tool_name="Knowledge Base",
+            action="retrieve_context",
+            status="ok",
+            summary="Knowledge Base retrieved Acme Corp records and vendor master data.",
+            payload={"vendor": "Acme Corp"},
+            conversation_id="conv-001",
+            workflow_id="wf-901",
+            agent_run_id="run-002",
+        ),
+        ToolInvocation(
+            id="inv-002",
+            tool_id="tool-compliance",
+            tool_name="Compliance Vault",
+            action="run_check",
+            status="ok",
+            summary="Compliance Vault detected a missing signature on the W-9 artifact.",
+            payload={"workflowId": "wf-901"},
+            conversation_id="conv-001",
+            workflow_id="wf-901",
+            agent_run_id="run-003",
+        ),
+        ToolInvocation(
+            id="inv-003",
+            tool_id="tool-calendar",
+            tool_name="Calendar Control",
+            action="create_event",
+            status="ok",
+            summary="Calendar Control scheduled Day 1 orientation for Priya Nair.",
+            payload={"employee": "Priya Nair"},
+            conversation_id="conv-002",
+            workflow_id="wf-902",
+            agent_run_id="run-004",
+        ),
+    ]
+    session.add_all(invocations)
 
     await session.commit()
