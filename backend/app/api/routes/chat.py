@@ -43,7 +43,7 @@ async def chat_message(
     if conversation_id:
         await resolve_conversation(session, conversation_id, current_user)
 
-    message, invoked_tools, conversation_id, collaboration, workflow_id = await coordinator.respond(
+    message, invoked_tools, conversation_id, collaboration, workflow_id, route_action = await coordinator.respond(
         session,
         payload.agentId.strip(),
         message_text,
@@ -57,6 +57,7 @@ async def chat_message(
         invokedTools=invoked_tools,
         collaboration=collaboration,
         workflowId=workflow_id,
+        routeAction=route_action,
     )
 
 

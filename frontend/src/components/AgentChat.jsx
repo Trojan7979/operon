@@ -29,7 +29,62 @@ const starterMessages = {
   verifier: "Shield Verifier is online. Ask me to validate risk, compliance, or audit-related concerns.",
 };
 
-export function AgentChat({ token }) {
+function RouteActionCard({ action, onContinue }) {
+  const [showTrace, setShowTrace] = useState(false);
+  const captured = Object.entries(action.prefill ?? {})
+    .filter(([, value]) => value)
+    .filter(([key]) => !['phone', 'location'].includes(key));
+
+  return (
+    <div className="mt-3 rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-3">
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300">
+        Specialist Handoff
+      </p>
+      <p className="mt-1 text-xs text-zinc-300">
+        Nexus Orchestrator routed this goal to the Onboarding Agent workspace.
+      </p>
+      {captured.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {captured.map(([key, value]) => (
+            <span
+              key={key}
+              className="rounded-full border border-cyan-500/20 bg-black/30 px-2 py-1 text-[10px] text-cyan-200"
+            >
+              {key}: {value}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          onClick={() => onContinue?.(action)}
+          className="rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-zinc-950 transition-colors hover:bg-cyan-400"
+        >
+          {action.ctaLabel ?? 'Continue'}
+        </button>
+        {action.trace?.length > 0 && (
+          <button
+            onClick={() => setShowTrace((value) => !value)}
+            className="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 transition-colors hover:border-cyan-500/40 hover:text-white"
+          >
+            {showTrace ? 'Hide Execution Trace' : 'Show Execution Trace'}
+          </button>
+        )}
+      </div>
+      {showTrace && action.trace?.length > 0 && (
+        <div className="mt-3 space-y-2 rounded-xl border border-zinc-800 bg-black/30 px-3 py-3">
+          {action.trace.map((step, index) => (
+            <p key={`${step}-${index}`} className="text-xs text-zinc-400">
+              {index + 1}. {step}
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function AgentChat({ token, onRouteIntent }) {
   const [selectedAgent, setSelectedAgent] = useState(agents[0]);
   const [messages, setMessages] = useState([
     { sender: 'agent', text: starterMessages.orchestrator, agentId: 'orchestrator' }
@@ -85,6 +140,7 @@ export function AgentChat({ token }) {
           collaboration: response.collaboration ?? [],
           workflowId: response.workflowId ?? null,
           conversationId: response.conversationId ?? null,
+          routeAction: response.routeAction ?? null,
         }
       ]);
     } catch (err) {
@@ -99,6 +155,9 @@ export function AgentChat({ token }) {
   const chatApiCalls = apiCalls.filter(call => call.path.startsWith('/chat'));
 
   const renderAgentLabel = (agentId) => {
+    if (agentId === 'workspace:onboarding') {
+      return 'Onboarding Agent Workspace';
+    }
     const knownAgent = agents.find((agent) => agent.id === agentId || `ag-${agent.id}` === agentId);
     return knownAgent?.name || agentId || 'Unknown agent';
   };
@@ -241,6 +300,9 @@ export function AgentChat({ token }) {
                         </div>
                       ))}
                     </div>
+                  )}
+                  {msg.sender === 'agent' && msg.routeAction && (
+                    <RouteActionCard action={msg.routeAction} onContinue={onRouteIntent} />
                   )}
                 </div>
                 {msg.sender === 'user' && (

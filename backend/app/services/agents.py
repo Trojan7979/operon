@@ -170,7 +170,7 @@ class AgentCoordinator:
         message: str,
         requester_email: str | None = None,
         conversation_id: str | None = None,
-    ) -> tuple[str, list[dict], str, list[dict], str | None]:
+    ) -> tuple[str, list[dict], str, list[dict], str | None, dict | None]:
         requester = await self._resolve_user(session, requester_email)
         agent = await self._resolve_agent(session, agent_id or "orchestrator")
         if agent is None:
@@ -217,6 +217,7 @@ class AgentCoordinator:
         normalized = message.lower()
         tool_calls: list[dict] = []
         collaboration: list[dict] = []
+        route_action: dict | None = None
 
         onboarding_intent = any(
             phrase in normalized
@@ -251,15 +252,28 @@ class AgentCoordinator:
 
         if clarification_message is not None:
             fallback_message = clarification_message
-        elif requester_email and (onboarding_intent or requester_email in self.onboarding_drafts):
-            fallback_message, tool_calls, collaboration, workflow_id = await self._handle_onboarding(
-                session=session,
-                requester=requester,
-                conversation=conversation,
-                primary_agent=agent,
-                user_message=message,
-                tool_calls=tool_calls,
-                collaboration=collaboration,
+        elif onboarding_intent:
+            onboarding_prefill = self._extract_onboarding_prefill(message)
+            collaboration.append(
+                {
+                    "handoffId": f"handoff-ui-{uuid4().hex[:8]}",
+                    "fromAgentId": agent.id,
+                    "toAgentId": "workspace:onboarding",
+                    "taskId": None,
+                    "status": "routed",
+                    "reason": "Route employee onboarding into the dedicated onboarding workspace.",
+                }
+            )
+            route_action = self._build_onboarding_route_action(
+                conversation_id=conversation.id,
+                prefill=onboarding_prefill,
+            )
+            fallback_message = self._build_onboarding_handoff_message(onboarding_prefill)
+            await self._write_audit_log(
+                session,
+                agent_name=agent.name,
+                message=f"Routed conversation {conversation.id} to the onboarding workspace.",
+                log_type="action",
             )
         elif meeting_intent:
             specialist_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
@@ -370,6 +384,7 @@ class AgentCoordinator:
             "message": response_message,
             "toolCalls": tool_calls,
             "collaboration": collaboration,
+            "routeAction": route_action,
         }
         await self._append_message(
             session,
@@ -386,7 +401,7 @@ class AgentCoordinator:
             log_type="action",
         )
         await session.commit()
-        return response_message, tool_calls, conversation.id, collaboration, workflow_id
+        return response_message, tool_calls, conversation.id, collaboration, workflow_id, route_action
 
     async def _handle_onboarding(
         self,
@@ -785,6 +800,86 @@ class AgentCoordinator:
         except RuntimeError:
             pass
         return fallback_message
+
+    def _extract_onboarding_prefill(self, message: str) -> dict:
+        draft = OnboardingDraft()
+        self._update_onboarding_draft(draft, message)
+        generated_email = None
+        if draft.name and not draft.email:
+            generated_email = self._generate_company_email(draft.name)
+        return {
+            "name": draft.name,
+            "role": draft.role,
+            "department": draft.department,
+            "email": draft.email,
+            "suggestedEmail": generated_email,
+            "startDate": draft.start_date,
+            "phone": draft.phone or "",
+            "location": draft.location or "",
+        }
+
+    @staticmethod
+    def _build_onboarding_route_action(*, conversation_id: str, prefill: dict) -> dict:
+        captured = [
+            label
+            for label, value in [
+                ("name", prefill.get("name")),
+                ("role", prefill.get("role")),
+                ("department", prefill.get("department")),
+                ("start date", prefill.get("startDate")),
+            ]
+            if value
+        ]
+        trace = [
+            "Nexus Orchestrator classified the request as employee onboarding.",
+            (
+                "Prefilled onboarding context from the goal: "
+                + ", ".join(captured)
+                if captured
+                else "No employee details were reliably captured from the goal, so the specialist will collect them."
+            ),
+            "Handed the request to the Onboarding Agent workspace for guided intake and automation.",
+        ]
+        return {
+            "type": "handoff",
+            "targetTab": "onboarding",
+            "targetAgentId": "workspace:onboarding",
+            "conversationId": conversation_id,
+            "ctaLabel": "Continue In Onboarding Workspace",
+            "prefill": prefill,
+            "trace": trace,
+        }
+
+    @staticmethod
+    def _build_onboarding_handoff_message(prefill: dict) -> str:
+        details = []
+        if prefill.get("role"):
+            details.append(f"role {prefill['role']}")
+        if prefill.get("department"):
+            details.append(f"department {prefill['department']}")
+        if prefill.get("startDate"):
+            details.append(f"start date {prefill['startDate']}")
+
+        summary = (
+            f"I already captured {', '.join(details)}. "
+            if details
+            else "I did not want to guess the employee details in chat. "
+        )
+        email_guidance = (
+            f"I also suggested the company email {prefill['suggestedEmail']}. "
+            if prefill.get("suggestedEmail")
+            else ""
+        )
+        return (
+            "I detected an onboarding request and routed it to the Onboarding Agent workspace. "
+            f"{summary}{email_guidance}"
+            "Continue there and the specialist will collect the remaining fields, then kick off the automation steps."
+        )
+
+    @staticmethod
+    def _generate_company_email(name: str) -> str:
+        slug = ".".join(re.findall(r"[A-Za-z]+", name.lower()))
+        return f"{slug or 'new.hire'}@nexuscore.ai"
 
     @staticmethod
     def _build_clarification_message(

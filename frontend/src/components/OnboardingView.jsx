@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   UserPlus, Search, Mail, Phone, Building, Briefcase, Calendar, MapPin,
   Bot, Loader, CheckCircle2, Clock, Camera
@@ -27,13 +27,68 @@ const automationSteps = [
   { name: 'Onboarding Complete', agent: 'Shield Verifier', duration: 900 },
 ];
 
-export function OnboardingView({ token }) {
+const emptyOnboardingDraft = {
+  name: '',
+  role: '',
+  department: '',
+  email: '',
+  phone: '',
+  location: '',
+  startDate: '',
+  photo: null,
+};
+
+function findNextMissingStep(formData) {
+  return onboardingAgentSteps.findIndex((step) => !formData[step.field]);
+}
+
+function buildHandoffSummary(routeAction) {
+  if (!routeAction?.prefill) {
+    return '';
+  }
+
+  const bits = [];
+  if (routeAction.prefill.role) {
+    bits.push(`role ${routeAction.prefill.role}`);
+  }
+  if (routeAction.prefill.department) {
+    bits.push(`department ${routeAction.prefill.department}`);
+  }
+  if (routeAction.prefill.startDate) {
+    bits.push(`start date ${routeAction.prefill.startDate}`);
+  }
+  if (routeAction.prefill.suggestedEmail) {
+    bits.push(`suggested company email ${routeAction.prefill.suggestedEmail}`);
+  }
+
+  return bits.length > 0
+    ? `Routed from Nexus Orchestrator with ${bits.join(', ')}.`
+    : 'Routed from Nexus Orchestrator for guided onboarding.';
+}
+
+function buildRoutePrefill(routeAction) {
+  const prefill = routeAction?.prefill ?? {};
+  return {
+    ...emptyOnboardingDraft,
+    name: prefill.name ?? '',
+    role: prefill.role ?? '',
+    department: prefill.department ?? '',
+    email: prefill.email ?? prefill.suggestedEmail ?? '',
+    phone: prefill.phone ?? '',
+    location: prefill.location ?? '',
+    startDate: prefill.startDate ?? '',
+    photo: null,
+  };
+}
+
+export function OnboardingView({ token, routeAction = null, onRouteConsumed }) {
   const [view, setView] = useState('portal');
   const [employees, setEmployees] = useState([]);
   const [selectedEmployee, setSelectedEmployee] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [handoffSummary, setHandoffSummary] = useState('');
 
   const [currentStep, setCurrentStep] = useState(0);
   const [formData, setFormData] = useState({});
@@ -78,44 +133,76 @@ export function OnboardingView({ token }) {
     employee.role.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const startOnboarding = () => {
+  const queueAutomation = useCallback((draft) => {
+    setChatHistory(prev => [...prev, {
+      sender: 'agent',
+      text: `Excellent! I have all the details for ${draft.name || 'the new employee'}. Initiating automated onboarding sequence now...`
+    }]);
+    window.setTimeout(() => {
+      setAutomationPhase(true);
+      setAutomationIdx(0);
+    }, 800);
+  }, []);
+
+  const startOnboarding = useCallback((prefill = emptyOnboardingDraft, summary = '') => {
+    const nextFormData = { ...emptyOnboardingDraft, ...prefill };
+    const nextStep = findNextMissingStep(nextFormData);
+    const initialHistory = [];
+
+    if (summary) {
+      initialHistory.push({ sender: 'agent', text: summary });
+    }
+    if (nextStep >= 0) {
+      initialHistory.push({ sender: 'agent', text: onboardingAgentSteps[nextStep].question });
+    }
+
     setView('new');
-    setCurrentStep(0);
-    setFormData({});
-    setChatHistory([{ sender: 'agent', text: onboardingAgentSteps[0].question }]);
+    setCurrentStep(nextStep >= 0 ? nextStep : onboardingAgentSteps.length - 1);
+    setFormData(nextFormData);
+    setChatHistory(initialHistory);
     setUserInput('');
     setAutomationPhase(false);
     setAutomationIdx(-1);
     setSubmitting(false);
     setError('');
-  };
+    setHandoffSummary(summary);
+
+    if (nextStep < 0) {
+      window.setTimeout(() => {
+        queueAutomation(nextFormData);
+      }, 300);
+    }
+  }, [queueAutomation]);
+
+  useEffect(() => {
+    if (!routeAction || routeAction.targetTab !== 'onboarding') {
+      return;
+    }
+
+    startOnboarding(buildRoutePrefill(routeAction), buildHandoffSummary(routeAction));
+    onRouteConsumed?.();
+  }, [routeAction, onRouteConsumed, startOnboarding]);
 
   const handleSubmitAnswer = () => {
     if (!userInput.trim() && onboardingAgentSteps[currentStep].type !== 'file') return;
 
     const step = onboardingAgentSteps[currentStep];
-    const answer = userInput;
+    const answer = userInput.trim();
+    const nextFormData = { ...formData, [step.field]: answer };
+    const nextStep = findNextMissingStep(nextFormData);
 
     setChatHistory(prev => [...prev, { sender: 'user', text: answer }]);
-    setFormData(prev => ({ ...prev, [step.field]: answer }));
+    setFormData(nextFormData);
     setUserInput('');
     setIsAgentTyping(true);
 
     window.setTimeout(() => {
       setIsAgentTyping(false);
-      if (currentStep < onboardingAgentSteps.length - 1) {
-        const nextStep = currentStep + 1;
+      if (nextStep >= 0) {
         setCurrentStep(nextStep);
         setChatHistory(prev => [...prev, { sender: 'agent', text: onboardingAgentSteps[nextStep].question }]);
       } else {
-        setChatHistory(prev => [...prev, {
-          sender: 'agent',
-          text: `Excellent! I have all the details for ${formData.name || answer}. Initiating automated onboarding sequence now...`
-        }]);
-        window.setTimeout(() => {
-          setAutomationPhase(true);
-          setAutomationIdx(0);
-        }, 800);
+        queueAutomation(nextFormData);
       }
     }, 600);
   };
@@ -126,19 +213,13 @@ export function OnboardingView({ token }) {
     const reader = new FileReader();
     reader.onload = (event) => {
       const photoData = event.target.result;
-      setFormData(prev => ({ ...prev, photo: photoData }));
+      const nextFormData = { ...formData, photo: photoData };
+      setFormData(nextFormData);
       setChatHistory(prev => [...prev, { sender: 'user', text: 'Photo uploaded', isPhoto: true, photoUrl: photoData }]);
       setIsAgentTyping(true);
       window.setTimeout(() => {
         setIsAgentTyping(false);
-        setChatHistory(prev => [...prev, {
-          sender: 'agent',
-          text: `Perfect! I have all the information. Let me now run the automated onboarding sequence for ${formData.name || 'the new employee'}...`
-        }]);
-        window.setTimeout(() => {
-          setAutomationPhase(true);
-          setAutomationIdx(0);
-        }, 800);
+        queueAutomation(nextFormData);
       }, 600);
     };
     reader.readAsDataURL(file);
@@ -193,7 +274,7 @@ export function OnboardingView({ token }) {
             </button>
           )}
           {view === 'portal' && (
-            <button onClick={startOnboarding} className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-purple-600 rounded-xl text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 hover:shadow-cyan-500/40 transition-all">
+            <button onClick={() => startOnboarding()} className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-purple-600 rounded-xl text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 hover:shadow-cyan-500/40 transition-all">
               <UserPlus className="h-4 w-4" /> New Employee
             </button>
           )}
@@ -316,6 +397,12 @@ export function OnboardingView({ token }) {
                 <p className="text-[10px] text-green-400">Online • Step {Math.min(currentStep + 1, onboardingAgentSteps.length)} of {onboardingAgentSteps.length}</p>
               </div>
             </div>
+
+            {handoffSummary && (
+              <div className="border-b border-zinc-800 bg-cyan-500/10 px-4 py-3">
+                <p className="text-xs text-cyan-200">{handoffSummary}</p>
+              </div>
+            )}
 
             <div className="p-6 max-h-[400px] overflow-y-auto space-y-4">
               {chatHistory.map((msg, idx) => (

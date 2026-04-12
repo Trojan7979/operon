@@ -227,6 +227,7 @@ class ChatResponse(BaseModel):
     invokedTools: list[dict] = Field(default_factory=list)
     collaboration: list[dict] = Field(default_factory=list)
     workflowId: str | None = None
+    routeAction: dict | None = None
 
 
 class MeetingLineOut(BaseModel):

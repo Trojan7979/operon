@@ -36,6 +36,7 @@ export default function App() {
   const [session, setSession] = useState(() => getStoredSession());
   const [authError, setAuthError] = useState('');
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [pendingRouteAction, setPendingRouteAction] = useState(null);
   const user = session?.user ?? null;
   const token = session?.access_token ?? null;
   const {
@@ -95,6 +96,19 @@ export default function App() {
     clearStoredSession();
     setSession(null);
     setAuthError('');
+    setPendingRouteAction(null);
+  };
+
+  const handleRouteIntent = (action) => {
+    if (!action?.targetTab) {
+      return;
+    }
+    setPendingRouteAction(action);
+    setActiveTab(action.targetTab);
+  };
+
+  const handleRouteConsumed = () => {
+    setPendingRouteAction(null);
   };
 
   if (authChecking) {
@@ -204,13 +218,19 @@ export default function App() {
                 onRefreshWorkflows={refreshLiveData}
               />
             )}
-            {activeTab === 'onboarding' && <OnboardingView token={token} />}
+            {activeTab === 'onboarding' && (
+              <OnboardingView
+                token={token}
+                routeAction={pendingRouteAction}
+                onRouteConsumed={handleRouteConsumed}
+              />
+            )}
             {activeTab === 'workflows' && <WorkflowsView data={liveData} />}
             {activeTab === 'agents' && <AgentsView data={liveData} />}
             {activeTab === 'collab' && <AgentCollabGraph data={liveData} />}
             {activeTab === 'meetings' && <MeetingsView token={token} />}
             {activeTab === 'sla' && <SLAMonitor token={token} />}
-            {activeTab === 'chat' && <AgentChat token={token} />}
+            {activeTab === 'chat' && <AgentChat token={token} onRouteIntent={handleRouteIntent} />}
             {activeTab === 'audit' && <AuditTrailView data={liveData} />}
             {activeTab === 'rbac' && <RBACView token={token} />}
           </div>
