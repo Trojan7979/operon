@@ -30,6 +30,8 @@ The frontend is not useful by itself for the demo. It expects the backend API to
 
 - `http://127.0.0.1:8000/api/v1`
 
+For Cloud Run, the frontend container can now read the backend URL from the runtime env var `VITE_API_BASE_URL`, so you do not need to rebuild the image just to point it at a deployed backend.
+
 Start the backend separately before testing login or live data flows.
 
 ## Main Frontend Files
