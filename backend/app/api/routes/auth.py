@@ -31,12 +31,27 @@ from app.services.serializers import serialize_user
 router = APIRouter()
 
 
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def build_avatar(name: str) -> str:
+    parts = [part for part in name.split() if part]
+    return "".join(part[0] for part in parts[:2]).upper() or "U"
+
+
 async def authenticate_user(email: str, password: str, session: AsyncSession) -> User:
-    user = await session.scalar(select(User).where(User.email == email))
+    normalized_email = normalize_email(email)
+    user = await session.scalar(select(User).where(User.email == normalized_email))
     if user is None or not verify_password(password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
+        )
+    if user.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This user account is not active.",
         )
     return user
 
@@ -90,20 +105,28 @@ async def register(
     payload: RegisterRequest,
     session: AsyncSession = Depends(get_db_session),
 ) -> TokenResponse:
-    existing_user = await session.scalar(select(User).where(User.email == payload.email))
+    normalized_email = normalize_email(payload.email)
+    normalized_name = payload.name.strip()
+    normalized_department = payload.department.strip()
+    normalized_role = payload.role.strip()
+
+    if normalized_role not in ROLE_TEMPLATES:
+        raise HTTPException(status_code=400, detail="Unsupported role.")
+
+    existing_user = await session.scalar(select(User).where(User.email == normalized_email))
     if existing_user is not None:
         raise HTTPException(status_code=409, detail="A user with that email already exists.")
 
-    permissions = ROLE_TEMPLATES.get(payload.role, ROLE_TEMPLATES["Product Manager"])
+    permissions = ROLE_TEMPLATES[normalized_role]
     user = User(
         id=f"u-{uuid4().hex[:8]}",
-        name=payload.name,
-        email=payload.email,
+        name=normalized_name,
+        email=normalized_email,
         password_hash=get_password_hash(payload.password),
-        role=payload.role,
-        avatar="".join(part[0] for part in payload.name.split()[:2]).upper(),
+        role=normalized_role,
+        avatar=build_avatar(normalized_name),
         status="active",
-        department=payload.department,
+        department=normalized_department,
         permissions=permissions,
     )
     session.add(user)
@@ -137,17 +160,26 @@ async def refresh(
     payload: RefreshTokenRequest,
     session: AsyncSession = Depends(get_db_session),
 ) -> TokenResponse:
+    refresh_token_value = payload.refreshToken.strip()
+    if not refresh_token_value:
+        raise HTTPException(status_code=400, detail="Refresh token is required.")
+
     auth_session = await session.scalar(
         select(AuthSession).where(
-            AuthSession.refresh_token_hash == hash_token(payload.refreshToken),
+            AuthSession.refresh_token_hash == hash_token(refresh_token_value),
             AuthSession.status == "active",
         )
     )
-    if auth_session is None or auth_session.expires_at <= datetime.now(UTC):
+    if auth_session is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token is invalid.")
+    if auth_session.expires_at <= datetime.now(UTC):
+        auth_session.status = "expired"
+        auth_session.revoked_at = datetime.now(UTC)
+        await session.commit()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token is expired.")
 
     user = await session.get(User, auth_session.user_id)
-    if user is None:
+    if user is None or user.status != "active":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User session is invalid.")
 
     auth_session.status = "rotated"
@@ -164,11 +196,14 @@ async def logout(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
+    refresh_token_value = payload.refreshToken.strip() if payload.refreshToken else None
     revoked = await revoke_user_sessions(
         current_user.id,
         session,
-        refresh_token=payload.refreshToken,
+        refresh_token=refresh_token_value,
     )
+    if refresh_token_value and revoked == 0:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token is invalid.")
     await session.commit()
     return {"status": "ok", "revokedSessions": revoked}
 

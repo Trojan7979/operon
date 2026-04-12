@@ -170,6 +170,8 @@ async def analyze_meeting(
         .where(Meeting.id == meeting_id)
         .options(selectinload(Meeting.extracted_items))
     )
+    if refreshed is None:
+        raise HTTPException(status_code=404, detail="Meeting not found after analysis.")
     return [
         MeetingItemOut.model_validate(
             {

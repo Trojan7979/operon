@@ -5,15 +5,56 @@ const API_BASE =
   'http://127.0.0.1:8000/api/v1';
 
 const SESSION_KEY = 'nexuscore-session';
+const TRACE_LIMIT = 25;
+const apiTraceListeners = new Set();
+const apiTrace = [];
+
+function emitApiTrace(entry) {
+  apiTrace.unshift(entry);
+  if (apiTrace.length > TRACE_LIMIT) {
+    apiTrace.length = TRACE_LIMIT;
+  }
+  apiTraceListeners.forEach((listener) => listener([...apiTrace]));
+}
 
 async function request(path, { method = 'GET', token, body } = {}) {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const url = `${API_BASE}${path}`;
+  const startedAt = Date.now();
+  let response;
+
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (error) {
+    emitApiTrace({
+      id: `${startedAt}-${path}`,
+      method,
+      path,
+      url,
+      status: 'NETWORK_ERROR',
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      createdAt: new Date(startedAt).toISOString(),
+      error: error.message || 'Network request failed.',
+    });
+    throw error;
+  }
+
+  emitApiTrace({
+    id: `${startedAt}-${path}`,
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
+    path,
+    url,
+    status: response.status,
+    ok: response.ok,
+    durationMs: Date.now() - startedAt,
+    createdAt: new Date(startedAt).toISOString(),
   });
 
   if (!response.ok) {
@@ -32,6 +73,18 @@ async function request(path, { method = 'GET', token, body } = {}) {
   }
 
   return response.json();
+}
+
+export function getApiBase() {
+  return API_BASE;
+}
+
+export function subscribeApiTrace(listener) {
+  apiTraceListeners.add(listener);
+  listener([...apiTrace]);
+  return () => {
+    apiTraceListeners.delete(listener);
+  };
 }
 
 export function getStoredSession() {
@@ -132,13 +185,14 @@ export function fetchSlaOverview(token) {
   return request('/sla/overview', { token });
 }
 
-export function sendAgentMessage(token, agentId, message) {
-  return request('/chat', {
+export function sendAgentMessage(token, agentId, message, conversationId = null) {
+  return request('/chat/message', {
     method: 'POST',
     token,
     body: {
       agentId,
       message,
+      ...(conversationId ? { conversationId } : {}),
     },
   });
 }

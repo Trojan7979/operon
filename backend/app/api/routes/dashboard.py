@@ -24,6 +24,8 @@ async def overview(
     session: AsyncSession = Depends(get_db_session),
 ) -> DashboardOverview:
     metric = await session.get(SystemMetric, 1)
+    if metric is None:
+        raise RuntimeError("System metrics record is missing.")
     agents = list(await session.scalars(select(Agent).order_by(Agent.name)))
     workflows = list(
         await session.scalars(

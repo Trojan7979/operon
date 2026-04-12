@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Send, Bot, User, Cpu, BrainCircuit, Database,
-  Zap, ShieldCheck, Loader, Sparkles
+  Send, User, Cpu, BrainCircuit, Database,
+  Zap, ShieldCheck, Loader, Sparkles, Network, ArrowRightLeft
 } from 'lucide-react';
-import { sendAgentMessage } from '../api';
+import { getApiBase, sendAgentMessage, subscribeApiTrace } from '../api';
 
 const agents = [
   { id: 'orchestrator', name: 'Nexus Orchestrator', icon: Cpu, color: 'cyan', desc: 'Manages workflows and routing' },
@@ -37,15 +37,24 @@ export function AgentChat({ token }) {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState('');
+  const [conversationId, setConversationId] = useState(null);
+  const [apiCalls, setApiCalls] = useState([]);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
+  useEffect(() => {
+    return subscribeApiTrace((entries) => {
+      setApiCalls(entries);
+    });
+  }, []);
+
   const switchAgent = (agent) => {
     setSelectedAgent(agent);
     setError('');
+    setConversationId(null);
     setMessages([
       {
         sender: 'agent',
@@ -64,7 +73,8 @@ export function AgentChat({ token }) {
     setIsTyping(true);
 
     try {
-      const response = await sendAgentMessage(token, selectedAgent.id, userMsg);
+      const response = await sendAgentMessage(token, selectedAgent.id, userMsg, conversationId);
+      setConversationId(response.conversationId ?? null);
       setMessages(prev => [
         ...prev,
         {
@@ -72,6 +82,9 @@ export function AgentChat({ token }) {
           text: response.message,
           agentId: selectedAgent.id,
           invokedTools: response.invokedTools ?? [],
+          collaboration: response.collaboration ?? [],
+          workflowId: response.workflowId ?? null,
+          conversationId: response.conversationId ?? null,
         }
       ]);
     } catch (err) {
@@ -83,6 +96,12 @@ export function AgentChat({ token }) {
 
   const c = colorClasses[selectedAgent.color];
   const AgentIcon = selectedAgent.icon;
+  const chatApiCalls = apiCalls.filter(call => call.path.startsWith('/chat'));
+
+  const renderAgentLabel = (agentId) => {
+    const knownAgent = agents.find((agent) => agent.id === agentId || `ag-${agent.id}` === agentId);
+    return knownAgent?.name || agentId || 'Unknown agent';
+  };
 
   const renderText = (text) => {
     return text.split('\n').map((line, i) => {
@@ -146,6 +165,7 @@ export function AgentChat({ token }) {
           </div>
         </div>
 
+        <div className="flex-1 flex gap-6 min-h-0">
         <div className="flex-1 glass-panel rounded-2xl flex flex-col overflow-hidden">
           <div className={`p-4 border-b border-zinc-800 flex items-center gap-3 ${c.bg}`}>
             <div className={`h-8 w-8 rounded-lg flex items-center justify-center ${c.bg} border ${c.border}`}>
@@ -156,6 +176,10 @@ export function AgentChat({ token }) {
               <p className="text-[10px] text-green-400 flex items-center gap-1">
                 <span className="h-1.5 w-1.5 rounded-full bg-green-400"></span> Online
               </p>
+            </div>
+            <div className="ml-auto text-right">
+              <p className="text-[10px] uppercase tracking-wider text-zinc-500">Conversation</p>
+              <p className="text-xs font-mono text-cyan-300">{conversationId ?? 'Not started'}</p>
             </div>
           </div>
 
@@ -173,6 +197,30 @@ export function AgentChat({ token }) {
                     : 'bg-zinc-800/80 text-zinc-300 rounded-bl-none border border-zinc-700'
                 }`}>
                   {renderText(msg.text)}
+                  {msg.sender === 'agent' && msg.collaboration?.length > 0 && (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
+                        Agent Collaboration
+                      </p>
+                      {msg.collaboration.map((entry, idx2) => (
+                        <div
+                          key={`${entry.handoffId ?? idx2}`}
+                          className="rounded-xl border border-purple-500/10 bg-black/30 px-3 py-2"
+                        >
+                          <div className="flex items-center gap-2 text-xs text-purple-300 font-semibold">
+                            <ArrowRightLeft className="h-3 w-3" />
+                            <span>
+                              {renderAgentLabel(entry.fromAgentId)} {'->'} {renderAgentLabel(entry.toAgentId)}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs text-zinc-400">{entry.reason}</p>
+                          <p className="mt-1 text-[10px] uppercase tracking-wider text-zinc-500">
+                            {entry.status} {msg.workflowId ? `• workflow ${msg.workflowId}` : ''}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {msg.sender === 'agent' && msg.invokedTools?.length > 0 && (
                     <div className="mt-3 space-y-2">
                       <p className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
@@ -239,6 +287,44 @@ export function AgentChat({ token }) {
               </button>
             </div>
           </div>
+        </div>
+        <div className="w-80 flex-shrink-0 glass-panel rounded-2xl overflow-hidden">
+          <div className="p-4 border-b border-zinc-800 flex items-center gap-2">
+            <Network className="h-4 w-4 text-cyan-400" />
+            <div>
+              <h3 className="text-sm font-bold text-white">API Activity</h3>
+              <p className="text-[10px] text-zinc-500">Frontend to backend trace</p>
+            </div>
+          </div>
+          <div className="p-4 border-b border-zinc-800 bg-black/20">
+            <p className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Base URL</p>
+            <p className="text-xs font-mono text-cyan-300 break-all">{getApiBase()}</p>
+          </div>
+          <div className="p-4 space-y-3 max-h-[calc(100vh-16rem)] overflow-y-auto">
+            {chatApiCalls.length === 0 && (
+              <div className="rounded-xl border border-zinc-800 bg-black/30 px-3 py-3 text-xs text-zinc-500">
+                Send a message to show the exact chat API calls from the frontend.
+              </div>
+            )}
+            {chatApiCalls.map((call) => (
+              <div key={call.id} className="rounded-xl border border-zinc-800 bg-black/30 px-3 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300">
+                    {call.method}
+                  </span>
+                  <span className={`text-[10px] font-mono ${call.ok ? 'text-green-400' : 'text-red-400'}`}>
+                    {call.status}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs font-mono text-zinc-300">{call.path}</p>
+                <p className="mt-1 text-[10px] text-zinc-500">{call.durationMs}ms</p>
+                {call.error && (
+                  <p className="mt-2 text-[10px] text-red-300">{call.error}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
         </div>
       </div>
     </div>
