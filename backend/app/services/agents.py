@@ -227,7 +227,17 @@ class AgentCoordinator:
         retrieval_intent = any(word in normalized for word in ["find", "fetch", "search", "vendor", "employee"])
         meeting_intent = any(word in normalized for word in ["meeting", "transcript", "summary"])
 
-        if workflow_intent and conversation.workflow_id is None:
+        clarification_message = self._build_clarification_message(
+            normalized,
+            message,
+            onboarding_intent=onboarding_intent,
+            workflow_intent=workflow_intent,
+            compliance_intent=compliance_intent,
+            retrieval_intent=retrieval_intent,
+            meeting_intent=meeting_intent,
+        )
+
+        if clarification_message is None and workflow_intent and conversation.workflow_id is None:
             workflow = await self._create_request_workflow(session, conversation, message)
             conversation.workflow_id = workflow.id
             orchestrator_task.workflow_id = workflow.id
@@ -239,7 +249,9 @@ class AgentCoordinator:
             "and validate compliance. Share the task and I will route it through the right agents."
         )
 
-        if requester_email and (onboarding_intent or requester_email in self.onboarding_drafts):
+        if clarification_message is not None:
+            fallback_message = clarification_message
+        elif requester_email and (onboarding_intent or requester_email in self.onboarding_drafts):
             fallback_message, tool_calls, collaboration, workflow_id = await self._handle_onboarding(
                 session=session,
                 requester=requester,
@@ -754,6 +766,8 @@ class AgentCoordinator:
         collaboration: list[dict],
         fallback_message: str,
     ) -> str:
+        if not tool_calls and not collaboration:
+            return fallback_message
         if not self.vertex_gateway.enabled:
             return fallback_message
 
@@ -771,6 +785,66 @@ class AgentCoordinator:
         except RuntimeError:
             pass
         return fallback_message
+
+    @staticmethod
+    def _build_clarification_message(
+        normalized: str,
+        user_message: str,
+        *,
+        onboarding_intent: bool,
+        workflow_intent: bool,
+        compliance_intent: bool,
+        retrieval_intent: bool,
+        meeting_intent: bool,
+    ) -> str | None:
+        stripped = user_message.strip()
+        if onboarding_intent:
+            return None
+
+        if workflow_intent and len(stripped.split()) <= 5:
+            return (
+                "I can start that workflow. What process should I run, and what outcome do you want "
+                "me to achieve?"
+            )
+
+        if workflow_intent and not any(
+            keyword in normalized
+            for keyword in [
+                "vendor",
+                "employee",
+                "onboarding",
+                "invoice",
+                "contract",
+                "procurement",
+                "meeting",
+                "approval",
+            ]
+        ):
+            return (
+                "I can coordinate that. Tell me the workflow type plus the target, for example the "
+                "vendor, employee, contract, or approval request involved."
+            )
+
+        if compliance_intent and not any(
+            keyword in normalized for keyword in ["vendor", "employee", "workflow", "invoice", "contract"]
+        ):
+            return (
+                "I can run the compliance check. Which workflow, vendor, employee, invoice, or contract "
+                "should I review?"
+            )
+
+        if retrieval_intent and len(stripped.split()) <= 4:
+            return (
+                "I can look that up. What record should I search for, and what detail do you need back?"
+            )
+
+        if meeting_intent and not any(keyword in normalized for keyword in ["transcript", "action", "summary"]):
+            return (
+                "I can help with the meeting. Do you want a summary, extracted action items, or transcript "
+                "analysis?"
+            )
+
+        return None
 
     @staticmethod
     def _build_prompt(
@@ -941,7 +1015,7 @@ class AgentCoordinator:
 
         if not draft.name and lowered.startswith("onboard "):
             possible_name = message[8:].strip()
-            if "@" not in possible_name and len(possible_name.split()) >= 2:
+            if self._looks_like_person_name(possible_name):
                 draft.name = possible_name.title()
 
         if draft.requested_field:
@@ -986,3 +1060,36 @@ class AgentCoordinator:
             "start_date": "What is the employee's start date?",
         }
         return f"{collected_line} {prompts[field_name]}"
+
+    @staticmethod
+    def _looks_like_person_name(value: str) -> bool:
+        cleaned = value.strip()
+        if "@" in cleaned or len(cleaned.split()) < 2:
+            return False
+
+        normalized = cleaned.lower()
+        generic_tokens = {
+            "a",
+            "an",
+            "new",
+            "engineer",
+            "software",
+            "senior",
+            "backend",
+            "product",
+            "designer",
+            "manager",
+            "engineering",
+            "design",
+            "product",
+            "hr",
+            "starting",
+            "start",
+            "role",
+            "department",
+        }
+        if any(token in normalized.split() for token in generic_tokens):
+            return False
+        if " in " in normalized or " starting " in normalized or " start " in normalized:
+            return False
+        return True
