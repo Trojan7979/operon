@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -17,12 +18,14 @@ from app.db.models import (
     Conversation,
     ConversationMessage,
     Employee,
+    Meeting,
     ToolConnection,
     ToolInvocation,
     User,
     Workflow,
     WorkflowStep,
 )
+from app.services.mcp_calendar import GoogleCalendarMcpClient, build_google_meet_datetimes
 from app.services.vertex import VertexGateway
 
 
@@ -66,6 +69,38 @@ class OnboardingDraft:
             ("start_date", self.start_date),
         ]
         return [field for field, value in ordered_fields if not value]
+
+
+@dataclass
+class MeetingScheduleDraft:
+    requested: bool = False
+    title: str | None = None
+    provider: str | None = None
+    date: str | None = None
+    time: str | None = None
+    attendees: list[str] = field(default_factory=list)
+    agent_join: bool = True
+
+    def missing_fields(self) -> list[str]:
+        ordered_fields = [
+            ("title", self.title),
+            ("provider", self.provider),
+            ("date", self.date),
+            ("time", self.time),
+        ]
+        return [field for field, value in ordered_fields if not value]
+
+
+@dataclass
+class AgentRoutingPlan:
+    intent: str
+    primary_agent_alias: str
+    supporting_agent_aliases: list[str] = field(default_factory=list)
+    create_workflow: bool = False
+    needs_clarification: bool = False
+    clarification_message: str | None = None
+    reasoning: str = ""
+    meeting_schedule: MeetingScheduleDraft | None = None
 
 
 class MCPToolRegistry:
@@ -146,6 +181,33 @@ class MCPToolRegistry:
 
 
 class AgentCoordinator:
+    agent_catalog = {
+        "orchestrator": {
+            "id": "ag-orchestrator",
+            "name": "Nexus Orchestrator",
+            "description": "Manages workflows, routing, and cross-agent coordination.",
+        },
+        "intel": {
+            "id": "ag-intel",
+            "name": "MeetIntel Core",
+            "description": "Analyzes meetings, transcripts, summaries, and scheduling context.",
+        },
+        "retrieval": {
+            "id": "ag-retrieval",
+            "name": "Data Fetcher v4",
+            "description": "Retrieves records, knowledge-base context, employees, and vendor data.",
+        },
+        "executor": {
+            "id": "ag-executor",
+            "name": "Action Exec Alpha",
+            "description": "Executes workflow actions, calendar events, and operational tasks.",
+        },
+        "verifier": {
+            "id": "ag-verifier",
+            "name": "Shield Verifier",
+            "description": "Runs compliance, audit, policy, and risk validation.",
+        },
+    }
     alias_map = {
         "orchestrator": "ag-orchestrator",
         "intel": "ag-intel",
@@ -157,6 +219,7 @@ class AgentCoordinator:
     def __init__(self) -> None:
         self.tool_registry = MCPToolRegistry()
         self.vertex_gateway = VertexGateway()
+        self.google_calendar_mcp = GoogleCalendarMcpClient()
         self.onboarding_drafts: dict[str, OnboardingDraft] = {}
 
     async def get_agents(self, session: AsyncSession) -> list[Agent]:
@@ -214,35 +277,14 @@ class AgentCoordinator:
         )
         session.add(orchestrator_run)
 
-        normalized = message.lower()
         tool_calls: list[dict] = []
         collaboration: list[dict] = []
         route_action: dict | None = None
-
-        onboarding_intent = any(
-            phrase in normalized
-            for phrase in ["onboard", "new hire", "hire a new", "create employee", "add employee"]
+        routing_plan = await self._plan_request(
+            session=session,
+            requested_agent=agent,
+            message=message,
         )
-        workflow_intent = any(word in normalized for word in ["task", "workflow", "approval", "route"])
-        compliance_intent = any(word in normalized for word in ["compliance", "risk", "audit", "security"])
-        retrieval_intent = any(word in normalized for word in ["find", "fetch", "search", "vendor", "employee"])
-        meeting_intent = any(word in normalized for word in ["meeting", "transcript", "summary"])
-
-        clarification_message = self._build_clarification_message(
-            normalized,
-            message,
-            onboarding_intent=onboarding_intent,
-            workflow_intent=workflow_intent,
-            compliance_intent=compliance_intent,
-            retrieval_intent=retrieval_intent,
-            meeting_intent=meeting_intent,
-        )
-
-        if clarification_message is None and workflow_intent and conversation.workflow_id is None:
-            workflow = await self._create_request_workflow(session, conversation, message)
-            conversation.workflow_id = workflow.id
-            orchestrator_task.workflow_id = workflow.id
-            orchestrator_run.workflow_id = workflow.id
         workflow_id = conversation.workflow_id
 
         fallback_message = (
@@ -250,9 +292,9 @@ class AgentCoordinator:
             "and validate compliance. Share the task and I will route it through the right agents."
         )
 
-        if clarification_message is not None:
-            fallback_message = clarification_message
-        elif onboarding_intent:
+        if routing_plan.needs_clarification and routing_plan.clarification_message:
+            fallback_message = routing_plan.clarification_message
+        elif routing_plan.intent == "onboarding":
             onboarding_prefill = self._extract_onboarding_prefill(message)
             collaboration.append(
                 {
@@ -261,7 +303,7 @@ class AgentCoordinator:
                     "toAgentId": "workspace:onboarding",
                     "taskId": None,
                     "status": "routed",
-                    "reason": "Route employee onboarding into the dedicated onboarding workspace.",
+                    "reason": routing_plan.reasoning or "Route employee onboarding into the dedicated onboarding workspace.",
                 }
             )
             route_action = self._build_onboarding_route_action(
@@ -275,7 +317,55 @@ class AgentCoordinator:
                 message=f"Routed conversation {conversation.id} to the onboarding workspace.",
                 log_type="action",
             )
-        elif meeting_intent:
+        elif routing_plan.intent == "meeting_schedule":
+            meeting_schedule = routing_plan.meeting_schedule or MeetingScheduleDraft(requested=True)
+            meeting, scheduling_workflow_id, execution_response, delegated_calls, delegated_collaboration = await self._delegate_meeting_scheduling(
+                session,
+                conversation=conversation,
+                from_agent=agent,
+                requester=requester,
+                schedule=meeting_schedule,
+                description=message,
+                handoff_reason=routing_plan.reasoning
+                or "Create the meeting event and confirm the booking details.",
+            )
+            workflow_id = scheduling_workflow_id
+            conversation.workflow_id = workflow_id
+            orchestrator_task.workflow_id = workflow_id
+            orchestrator_run.workflow_id = workflow_id
+            tool_calls.extend(delegated_calls)
+            collaboration.extend(delegated_collaboration)
+            fallback_message = execution_response
+
+            if meeting.agent_joined:
+                intel_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+                    session=session,
+                    conversation=conversation,
+                    from_agent=agent,
+                    to_agent_alias="intel",
+                    title="Prepare meeting intelligence coverage",
+                    description=message,
+                    run_type="analysis",
+                    handoff_reason="Attach MeetIntel Core so the meeting is captured and summarized automatically.",
+                    tool_requests=[
+                        (
+                            "Notes Workspace",
+                            "write_note",
+                            {
+                                "meetingId": meeting.id,
+                                "title": meeting.title,
+                                "note": "MeetIntel Core was assigned to join, transcribe, and extract actions.",
+                            },
+                        )
+                    ],
+                )
+                tool_calls.extend(delegated_calls)
+                collaboration.extend(delegated_collaboration)
+                fallback_message = intel_response
+
+            fallback_message = self._build_meeting_scheduled_message(meeting)
+            route_action = self._build_meeting_route_action(conversation_id=conversation.id, meeting=meeting)
+        elif routing_plan.intent == "meeting_intelligence":
             specialist_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
                 session=session,
                 conversation=conversation,
@@ -284,14 +374,25 @@ class AgentCoordinator:
                 title="Meeting intelligence",
                 description=message,
                 run_type="analysis",
-                handoff_reason="Extract actions and summarize meeting context.",
+                handoff_reason=routing_plan.reasoning or "Extract actions and summarize meeting context.",
                 tool_requests=[("Notes Workspace", "summarize_meeting", {"query": message})],
             )
             fallback_message = specialist_response
             tool_calls.extend(delegated_calls)
             collaboration.extend(delegated_collaboration)
-        elif workflow_intent:
-            if retrieval_intent:
+        elif routing_plan.intent == "workflow":
+            if routing_plan.create_workflow and conversation.workflow_id is None:
+                workflow = await self._create_request_workflow(session, conversation, message)
+                conversation.workflow_id = workflow.id
+                workflow_id = workflow.id
+                orchestrator_task.workflow_id = workflow.id
+                orchestrator_run.workflow_id = workflow.id
+
+            should_retrieve = (
+                "retrieval" in routing_plan.supporting_agent_aliases
+                or routing_plan.primary_agent_alias == "retrieval"
+            )
+            if should_retrieve:
                 retrieval_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
                     session=session,
                     conversation=conversation,
@@ -339,7 +440,7 @@ class AgentCoordinator:
             tool_calls.extend(delegated_calls)
             collaboration.extend(delegated_collaboration)
             fallback_message = verifier_response
-        elif compliance_intent:
+        elif routing_plan.intent == "compliance":
             specialist_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
                 session=session,
                 conversation=conversation,
@@ -348,13 +449,13 @@ class AgentCoordinator:
                 title="Compliance verification",
                 description=message,
                 run_type="verification",
-                handoff_reason="Run a compliance-oriented pass across the request.",
+                handoff_reason=routing_plan.reasoning or "Run a compliance-oriented pass across the request.",
                 tool_requests=[("Compliance Vault", "run_check", {"query": message})],
             )
             fallback_message = specialist_response
             tool_calls.extend(delegated_calls)
             collaboration.extend(delegated_collaboration)
-        elif retrieval_intent:
+        elif routing_plan.intent == "retrieval":
             specialist_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
                 session=session,
                 conversation=conversation,
@@ -363,10 +464,26 @@ class AgentCoordinator:
                 title="Context retrieval",
                 description=message,
                 run_type="retrieval",
-                handoff_reason="Search connected systems for the requested records.",
+                handoff_reason=routing_plan.reasoning or "Search connected systems for the requested records.",
                 tool_requests=[("Knowledge Base", "retrieve_context", {"query": message})],
             )
             fallback_message = specialist_response
+            tool_calls.extend(delegated_calls)
+            collaboration.extend(delegated_collaboration)
+        elif agent.id != self.alias_map["orchestrator"]:
+            direct_from_agent = await self._resolve_agent(session, "orchestrator") or agent
+            direct_response, delegated_calls, delegated_collaboration = await self._delegate_to_agent(
+                session=session,
+                conversation=conversation,
+                from_agent=direct_from_agent,
+                to_agent_alias=self._alias_for_agent_id(agent.id) or "orchestrator",
+                title=f"{agent.name} specialist pass",
+                description=message,
+                run_type="analysis",
+                handoff_reason="The request was sent directly to the selected specialist agent.",
+                tool_requests=self._tool_requests_for_direct_agent(agent.id, message),
+            )
+            fallback_message = direct_response
             tool_calls.extend(delegated_calls)
             collaboration.extend(delegated_collaboration)
 
@@ -507,6 +624,712 @@ class AgentCoordinator:
             f"and coordinated verification plus Day 1 setup for {draft.start_date}. {verifier_response} {execution_response}"
         )
         return fallback_message, tool_calls, collaboration, workflow.id
+
+    async def _plan_request(
+        self,
+        *,
+        session: AsyncSession,
+        requested_agent: Agent,
+        message: str,
+    ) -> AgentRoutingPlan:
+        if requested_agent.id != self.alias_map["orchestrator"]:
+            return self._plan_direct_request(requested_agent)
+
+        llm_plan = await self._plan_request_with_llm(message)
+        if llm_plan is not None:
+            return llm_plan
+        return self._fallback_plan_request(message)
+
+    def _plan_direct_request(self, requested_agent: Agent) -> AgentRoutingPlan:
+        alias = self._alias_for_agent_id(requested_agent.id) or "orchestrator"
+        intent_map = {
+            "intel": "meeting_intelligence",
+            "retrieval": "retrieval",
+            "executor": "workflow",
+            "verifier": "compliance",
+        }
+        return AgentRoutingPlan(
+            intent=intent_map.get(alias, "general"),
+            primary_agent_alias=alias,
+            supporting_agent_aliases=[],
+            create_workflow=alias == "executor",
+            reasoning=f"The user addressed {requested_agent.name} directly, so the request stays with that specialist.",
+        )
+
+    async def _plan_request_with_llm(self, message: str) -> AgentRoutingPlan | None:
+        if not self.vertex_gateway.enabled:
+            return None
+
+        prompt = self._build_routing_prompt(message)
+        try:
+            result = await self.vertex_gateway.generate_text(
+                prompt,
+                max_output_tokens=600,
+                temperature=0.1,
+            )
+        except RuntimeError:
+            return None
+
+        payload = self._parse_json_response(result.get("text", ""))
+        if payload is None:
+            return None
+        return self._plan_from_llm_payload(payload)
+
+    def _plan_from_llm_payload(self, payload: dict) -> AgentRoutingPlan:
+        intent = str(payload.get("intent") or "general").strip().lower()
+        if intent not in {
+            "onboarding",
+            "meeting_schedule",
+            "meeting_intelligence",
+            "workflow",
+            "compliance",
+            "retrieval",
+            "general",
+        }:
+            intent = "general"
+
+        primary_agent_alias = str(payload.get("primaryAgent") or "orchestrator").strip().lower()
+        if primary_agent_alias not in self.alias_map:
+            primary_agent_alias = "orchestrator"
+
+        supporting_agent_aliases = [
+            alias
+            for alias in payload.get("supportingAgents", [])
+            if isinstance(alias, str) and alias in self.alias_map and alias != primary_agent_alias
+        ]
+
+        meeting_payload = payload.get("meetingSchedule") if isinstance(payload.get("meetingSchedule"), dict) else {}
+        meeting_schedule = MeetingScheduleDraft(
+            requested=bool(meeting_payload.get("requested")) or intent == "meeting_schedule",
+            title=self._clean_optional_text(meeting_payload.get("title")),
+            provider=self._normalize_provider(self._clean_optional_text(meeting_payload.get("provider"))),
+            date=self._clean_optional_text(meeting_payload.get("date")),
+            time=self._clean_optional_text(meeting_payload.get("time")),
+            attendees=self._normalize_attendees(meeting_payload.get("attendees")),
+            agent_join=self._coerce_agent_join(meeting_payload.get("agentJoin")),
+        )
+
+        if intent == "meeting_schedule":
+            missing_fields = meeting_schedule.missing_fields()
+            if missing_fields:
+                return AgentRoutingPlan(
+                    intent=intent,
+                    primary_agent_alias=primary_agent_alias,
+                    supporting_agent_aliases=supporting_agent_aliases,
+                    create_workflow=True,
+                    needs_clarification=True,
+                    clarification_message=self._build_missing_meeting_message(meeting_schedule),
+                    reasoning=self._clean_optional_text(payload.get("reasoning"))
+                    or "The request looks like meeting scheduling, but key booking details are still missing.",
+                    meeting_schedule=meeting_schedule,
+                )
+
+        clarification_message = self._clean_optional_text(payload.get("clarificationMessage"))
+        needs_clarification = bool(payload.get("needsClarification")) and bool(clarification_message)
+        return AgentRoutingPlan(
+            intent=intent,
+            primary_agent_alias=primary_agent_alias,
+            supporting_agent_aliases=supporting_agent_aliases,
+            create_workflow=bool(payload.get("createWorkflow")),
+            needs_clarification=needs_clarification,
+            clarification_message=clarification_message if needs_clarification else None,
+            reasoning=self._clean_optional_text(payload.get("reasoning")) or "",
+            meeting_schedule=meeting_schedule if meeting_schedule.requested else None,
+        )
+
+    def _fallback_plan_request(self, message: str) -> AgentRoutingPlan:
+        normalized = message.lower()
+
+        onboarding_intent = any(
+            phrase in normalized
+            for phrase in ["onboard", "new hire", "hire a new", "create employee", "add employee"]
+        )
+        workflow_intent = any(word in normalized for word in ["task", "workflow", "approval", "route"])
+        compliance_intent = any(word in normalized for word in ["compliance", "risk", "audit", "security"])
+        retrieval_intent = any(word in normalized for word in ["find", "fetch", "search", "vendor", "employee"])
+        meeting_intelligence = any(word in normalized for word in ["transcript", "summary", "action items"])
+        meeting_schedule = self._looks_like_meeting_scheduling_request(normalized)
+
+        clarification_message = self._build_clarification_message(
+            normalized,
+            message,
+            onboarding_intent=onboarding_intent,
+            workflow_intent=workflow_intent,
+            compliance_intent=compliance_intent,
+            retrieval_intent=retrieval_intent,
+            meeting_intent=meeting_intelligence or meeting_schedule,
+        )
+
+        if onboarding_intent:
+            return AgentRoutingPlan(
+                intent="onboarding",
+                primary_agent_alias="orchestrator",
+                reasoning="The request is about onboarding a new employee and should move into the onboarding flow.",
+            )
+
+        if meeting_schedule:
+            schedule = self._extract_meeting_schedule_from_text(message)
+            missing_fields = schedule.missing_fields()
+            if missing_fields:
+                return AgentRoutingPlan(
+                    intent="meeting_schedule",
+                    primary_agent_alias="executor",
+                    supporting_agent_aliases=["intel"],
+                    create_workflow=True,
+                    needs_clarification=True,
+                    clarification_message=self._build_missing_meeting_message(schedule),
+                    reasoning="This looks like a meeting scheduling request, but the booking details are incomplete.",
+                    meeting_schedule=schedule,
+                )
+            return AgentRoutingPlan(
+                intent="meeting_schedule",
+                primary_agent_alias="executor",
+                supporting_agent_aliases=["intel"] if schedule.agent_join else [],
+                create_workflow=True,
+                reasoning="This request needs meeting scheduling automation through the executor and meeting intelligence stack.",
+                meeting_schedule=schedule,
+            )
+
+        if clarification_message:
+            primary_alias = "retrieval" if retrieval_intent else "orchestrator"
+            if compliance_intent:
+                primary_alias = "verifier"
+            elif meeting_intelligence:
+                primary_alias = "intel"
+            elif workflow_intent:
+                primary_alias = "executor"
+            return AgentRoutingPlan(
+                intent="general",
+                primary_agent_alias=primary_alias,
+                needs_clarification=True,
+                clarification_message=clarification_message,
+                reasoning="The request needs a bit more detail before safe routing.",
+            )
+
+        if workflow_intent:
+            supporting_agents = ["executor", "verifier"]
+            if retrieval_intent:
+                supporting_agents.insert(0, "retrieval")
+            return AgentRoutingPlan(
+                intent="workflow",
+                primary_agent_alias="executor",
+                supporting_agent_aliases=supporting_agents,
+                create_workflow=True,
+                reasoning="The request describes a workflow or approval path that should be orchestrated end to end.",
+            )
+
+        if compliance_intent:
+            return AgentRoutingPlan(
+                intent="compliance",
+                primary_agent_alias="verifier",
+                reasoning="The request is compliance-oriented and should go to Shield Verifier.",
+            )
+
+        if meeting_intelligence:
+            return AgentRoutingPlan(
+                intent="meeting_intelligence",
+                primary_agent_alias="intel",
+                reasoning="The request is about meeting analysis or transcript intelligence.",
+            )
+
+        if retrieval_intent:
+            return AgentRoutingPlan(
+                intent="retrieval",
+                primary_agent_alias="retrieval",
+                reasoning="The request is asking for records or context retrieval.",
+            )
+
+        return AgentRoutingPlan(
+            intent="general",
+            primary_agent_alias="orchestrator",
+            reasoning="The request should stay with the orchestrator until it is more specific.",
+        )
+
+    async def _schedule_meeting(
+        self,
+        session: AsyncSession,
+        *,
+        requester: User | None,
+        schedule: MeetingScheduleDraft,
+        acting_agent_name: str = "Nexus Orchestrator",
+    ) -> Meeting:
+        attendees = schedule.attendees or ([requester.name] if requester else [])
+        if schedule.agent_join and "MeetIntel Agent" not in attendees:
+            attendees = [*attendees, "MeetIntel Agent"]
+
+        meeting = Meeting(
+            id=f"mt-{uuid4().hex[:8]}",
+            title=schedule.title or "Scheduled Meeting",
+            provider=schedule.provider or "zoom",
+            date_label=schedule.date or "TBD",
+            time_label=schedule.time or "TBD",
+            duration="Scheduled",
+            status="scheduled",
+            agent_joined=schedule.agent_join,
+            agent_name="MeetIntel Core" if schedule.agent_join else None,
+            attendees=attendees,
+        )
+        session.add(meeting)
+        await self._write_audit_log(
+            session,
+            agent_name=acting_agent_name,
+            message=f"Scheduled meeting '{meeting.title}' on {meeting.date_label} via {meeting.provider}.",
+            log_type="event",
+        )
+        return meeting
+
+    async def _delegate_meeting_scheduling(
+        self,
+        session: AsyncSession,
+        *,
+        conversation: Conversation,
+        from_agent: Agent,
+        requester: User | None,
+        schedule: MeetingScheduleDraft,
+        description: str,
+        handoff_reason: str,
+    ) -> tuple[Meeting, str, str, list[dict], list[dict]]:
+        executor = await self._resolve_agent(session, "executor")
+        if executor is None:
+            raise ValueError("Meeting scheduling agent is not available.")
+
+        meeting = await self._schedule_meeting(
+            session,
+            requester=requester,
+            schedule=schedule,
+            acting_agent_name=executor.name,
+        )
+
+        # ── Real Google Calendar MCP call ─────────────────────────────────────
+        # When the provider is Google Meet and the MCP client is enabled, we
+        # call the actual stdio MCP server instead of the stub registry so a
+        # real Calendar event with a Meet link is created and invites are sent.
+        if (
+            schedule.provider == "gmeet"
+            and self.google_calendar_mcp.enabled
+            and schedule.date
+            and schedule.time
+        ):
+            attendee_emails = self._filter_emails(meeting.attendees)
+            # Ensure the organiser is always included as the first attendee.
+            if requester and requester.email:
+                organiser = requester.email.lower()
+                if organiser not in {e.lower() for e in attendee_emails}:
+                    attendee_emails.insert(0, requester.email)
+
+            if attendee_emails:
+                try:
+                    start_iso, end_iso = build_google_meet_datetimes(
+                        schedule.date, schedule.time
+                    )
+                    scheduled = await self.google_calendar_mcp.schedule_google_meet(
+                        title=meeting.title,
+                        start_iso=start_iso,
+                        end_iso=end_iso,
+                        attendee_emails=attendee_emails,
+                        description="Scheduled from NexusCore orchestrator via MCP.",
+                    )
+                    # Merge confirmed emails back; keep any non-email names (e.g. "MeetIntel Agent").
+                    non_email_names = [a for a in meeting.attendees if "@" not in a]
+                    meeting.attendees = (scheduled.attendee_emails or attendee_emails) + non_email_names
+                    await self._write_audit_log(
+                        session,
+                        agent_name=executor.name,
+                        message=(
+                            f"Google Calendar MCP created event for '{meeting.title}' "
+                            f"on {schedule.date} at {schedule.time}. "
+                            f"Invites sent to {len(scheduled.attendee_emails)} attendee(s)."
+                        ),
+                        log_type="event",
+                    )
+                except RuntimeError as exc:
+                    await self._write_audit_log(
+                        session,
+                        agent_name=executor.name,
+                        message=(
+                            f"Google Calendar MCP call failed for '{meeting.title}': {exc}. "
+                            "Falling back to DB-only record."
+                        ),
+                        log_type="warning",
+                    )
+        # ─────────────────────────────────────────────────────────────────────
+
+        workflow = await self._create_meeting_scheduling_workflow(
+            session,
+            conversation=conversation,
+            meeting=meeting,
+        )
+        conversation.workflow_id = workflow.id
+
+        task = self._create_agent_task(
+            assigned_agent_id=executor.id,
+            title="Automate meeting scheduling",
+            description=description,
+            priority="normal",
+            conversation_id=conversation.id,
+            workflow_id=workflow.id,
+        )
+        session.add(task)
+
+        handoff = AgentHandoff(
+            id=f"handoff-{uuid4().hex[:10]}",
+            from_agent_id=from_agent.id,
+            to_agent_id=executor.id,
+            task_id=task.id,
+            conversation_id=conversation.id,
+            workflow_id=workflow.id,
+            reason=handoff_reason,
+            status="accepted",
+        )
+        session.add(handoff)
+
+        run = self._start_run(
+            agent_id=executor.id,
+            task_id=task.id,
+            conversation_id=conversation.id,
+            workflow_id=workflow.id,
+            run_type="execution",
+            input_summary=description,
+        )
+        session.add(run)
+
+        # Always record the tool invocation in the stub registry so the UI
+        # collaboration trail and audit log are populated regardless of whether
+        # the real MCP call succeeded.
+        result = await self.tool_registry.invoke(
+            session,
+            tool_name="Calendar Control",
+            action="create_event",
+            payload={
+                "meetingId": meeting.id,
+                "title": meeting.title,
+                "provider": meeting.provider,
+                "date": meeting.date_label,
+                "time": meeting.time_label,
+                "attendees": meeting.attendees,
+            },
+            conversation_id=conversation.id,
+            workflow_id=workflow.id,
+            agent_run_id=run.id,
+        )
+        tool_calls = [result.as_dict()]
+
+        summary = self._build_specialist_summary(executor.name, tool_calls)
+        task.status = "completed"
+        task.result_payload = {
+            "meetingId": meeting.id,
+            "workflowId": workflow.id,
+            "toolCalls": tool_calls,
+            "summary": summary,
+        }
+        self._complete_run(run, summary)
+        await self._write_audit_log(
+            session,
+            agent_name=executor.name,
+            message=summary,
+            log_type="event",
+        )
+
+        collaboration = [
+            {
+                "handoffId": handoff.id,
+                "fromAgentId": from_agent.id,
+                "toAgentId": executor.id,
+                "taskId": task.id,
+                "status": handoff.status,
+                "reason": handoff.reason,
+            }
+        ]
+        return meeting, workflow.id, summary, tool_calls, collaboration
+
+    async def _create_meeting_scheduling_workflow(
+        self,
+        session: AsyncSession,
+        *,
+        conversation: Conversation,
+        meeting: Meeting,
+    ) -> Workflow:
+        workflow = Workflow(
+            id=f"wf-{uuid4().hex[:6]}",
+            workflow_type="Meeting Scheduling",
+            name=meeting.title,
+            status="completed",
+            health=100,
+            progress=100,
+            current_step="Meeting Confirmed",
+            assigned_agent="Action Exec Alpha",
+            prediction="Meeting scheduling completed automatically.",
+        )
+        session.add(workflow)
+
+        steps = [
+            ("Request Validation", "Nexus Orchestrator", "Validated the meeting request details."),
+            ("Calendar Booking", "Action Exec Alpha", f"Booked {meeting.provider} for {meeting.date_label} {meeting.time_label}."),
+            (
+                "Meeting Intelligence Assignment",
+                "MeetIntel Core" if meeting.agent_joined else "Nexus Orchestrator",
+                "Attached MeetIntel Core to join and summarize the meeting."
+                if meeting.agent_joined
+                else "Meeting will proceed without an AI attendee.",
+            ),
+            ("Meeting Confirmed", "Nexus Orchestrator", "Scheduling workflow completed successfully."),
+        ]
+        for index, (name, assigned_agent, detail) in enumerate(steps, start=1):
+            session.add(
+                WorkflowStep(
+                    workflow_id=workflow.id,
+                    position=index,
+                    name=name,
+                    agent=assigned_agent,
+                    status="completed",
+                    time_label="auto",
+                    detail=detail,
+                )
+            )
+
+        await self._write_audit_log(
+            session,
+            agent_name="Nexus Orchestrator",
+            message=f"Completed meeting scheduling workflow {workflow.id} for conversation {conversation.id}.",
+            log_type="action",
+        )
+        return workflow
+
+    def _build_routing_prompt(self, message: str) -> str:
+        agent_lines = "\n".join(
+            f"- {alias}: {details['name']} — {details['description']}"
+            for alias, details in self.agent_catalog.items()
+        )
+        today = datetime.now(UTC).date().isoformat()
+        return (
+            "You are the routing brain for the NexusCore multi-agent backend.\n"
+            "Analyse the user request and return a SINGLE valid JSON object — no markdown, "
+            "no code fences, no prose before or after.\n\n"
+            "# Required JSON keys and types\n"
+            "{\n"
+            '  "intent":              string  — one of: onboarding | meeting_schedule | meeting_intelligence | workflow | compliance | retrieval | general\n'
+            '  "primaryAgent":        string  — one of: orchestrator | intel | retrieval | executor | verifier\n'
+            '  "supportingAgents":    array of strings  — zero or more of the same allowed values above (never repeat primaryAgent)\n'
+            '  "createWorkflow":      boolean\n'
+            '  "needsClarification":  boolean\n'
+            '  "clarificationMessage": string | null  — short question to ask the user; null when needsClarification is false\n'
+            '  "reasoning":           string  — one sentence explaining the routing decision\n'
+            '  "meetingSchedule":     object | null\n'
+            "}\n\n"
+            "# meetingSchedule shape (use null when intent is NOT meeting_schedule)\n"
+            "{\n"
+            '  "requested": boolean,\n'
+            '  "title":    string | null,\n'
+            '  "provider": string | null  — one of: zoom | gmeet | teams — null if unknown\n'
+            '  "date":     string | null  — MUST be YYYY-MM-DD; convert relative dates using today\'s date\n'
+            '  "time":     string | null  — MUST be HH:MM or H:MM AM/PM (e.g. "14:30" or "2:30 PM")\n'
+            '  "attendees": array of strings  — email addresses or names extracted from the request; empty array if none\n'
+            '  "agentJoin": boolean  — true unless the user explicitly says they do not want the AI to join\n'
+            "}\n\n"
+            "# Rules\n"
+            "- If intent is meeting_schedule and ANY of title, provider, date, or time is missing, "
+            "set needsClarification=true and write a short clarificationMessage asking for the missing field(s).\n"
+            "- Dates: always output YYYY-MM-DD. Convert 'tomorrow', 'next Friday', 'Apr 18' etc. using today's date.\n"
+            f"  Today is {today}.\n"
+            "- Times: output HH:MM (24-hour) or H:MM AM/PM. Never output vague phrases like 'afternoon'.\n"
+            "- attendees must be a JSON array, even when empty: []\n"
+            "- agentJoin must be a JSON boolean true or false, never a string.\n"
+            "- supportingAgents must be a JSON array, even when empty: []\n"
+            "- When intent is NOT meeting_schedule, set meetingSchedule to null.\n"
+            "- Do NOT wrap the output in markdown code blocks or add any text outside the JSON.\n\n"
+            "# Available agents\n"
+            f"{agent_lines}\n\n"
+            f"User request: {message}"
+        )
+
+    @staticmethod
+    def _parse_json_response(text: str) -> dict | None:
+        candidate = text.strip()
+        if not candidate:
+            return None
+
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
+            candidate = re.sub(r"\s*```$", "", candidate)
+
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", candidate, re.DOTALL)
+            if not match:
+                return None
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return None
+
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _clean_optional_text(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @staticmethod
+    def _coerce_agent_join(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"false", "no", "off"}:
+                return False
+        return True
+
+    @staticmethod
+    def _normalize_provider(provider: str | None) -> str | None:
+        if not provider:
+            return None
+        lowered = provider.lower()
+        if "zoom" in lowered:
+            return "zoom"
+        if "google meet" in lowered or "gmeet" in lowered:
+            return "gmeet"
+        if "teams" in lowered:
+            return "teams"
+        return None
+
+    @staticmethod
+    def _normalize_attendees(value: object) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return []
+
+    @staticmethod
+    def _looks_like_meeting_scheduling_request(normalized: str) -> bool:
+        meeting_terms = ["meeting", "call", "sync", "standup", "1:1", "1on1"]
+        provider_terms = ["zoom", "google meet", "gmeet", "teams"]
+        scheduling_terms = ["schedule", "book", "set up", "arrange", "create"]
+        return any(term in normalized for term in scheduling_terms) and any(
+            term in normalized for term in [*meeting_terms, *provider_terms]
+        )
+
+    def _extract_meeting_schedule_from_text(self, message: str) -> MeetingScheduleDraft:
+        lowered = message.lower()
+        schedule = MeetingScheduleDraft(requested=self._looks_like_meeting_scheduling_request(lowered))
+        schedule.provider = self._normalize_provider(message)
+        schedule.agent_join = not any(
+            phrase in lowered
+            for phrase in ["without ai", "without the agent", "don't join", "do not join", "no bot"]
+        )
+
+        quoted_title = re.search(r"['\"]([^'\"]+)['\"]", message)
+        if quoted_title:
+            schedule.title = quoted_title.group(1).strip()
+        else:
+            titled_match = re.search(
+                r"(?:called|titled)\s+([A-Z][A-Za-z0-9&\-\s]{3,})",
+                message,
+                re.IGNORECASE,
+            )
+            if titled_match:
+                schedule.title = titled_match.group(1).strip(" .")
+
+        iso_date_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", message)
+        if iso_date_match:
+            schedule.date = iso_date_match.group(0)
+        else:
+            named_date_match = re.search(
+                r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?\b",
+                message,
+                re.IGNORECASE,
+            )
+            if named_date_match:
+                schedule.date = named_date_match.group(0)
+
+        time_match = re.search(r"\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?\b|\b\d{1,2}\s*(?:AM|PM|am|pm)\b", message)
+        if time_match:
+            schedule.time = time_match.group(0)
+
+        with_match = re.search(r"\bwith\s+(.+)$", message, re.IGNORECASE)
+        if with_match:
+            attendees_blob = with_match.group(1)
+            attendees_blob = re.split(r"\b(?:on|at|via|using)\b", attendees_blob, maxsplit=1)[0]
+            schedule.attendees = self._normalize_attendees(attendees_blob.replace(" and ", ", "))
+
+        return schedule
+
+    @staticmethod
+    def _build_missing_meeting_message(schedule: MeetingScheduleDraft) -> str:
+        missing_fields = schedule.missing_fields()
+        label_map = {
+            "title": "meeting title",
+            "provider": "provider",
+            "date": "date",
+            "time": "time",
+        }
+        missing = ", ".join(label_map[field] for field in missing_fields)
+        return (
+            "I can automate the meeting scheduling, but I still need the "
+            f"{missing}. Share them in one line, for example: "
+            "'Schedule Q2 planning on Zoom for Apr 18 at 3:00 PM with Sarah Chen and Rupam Jana.'"
+        )
+
+    @staticmethod
+    def _build_meeting_scheduled_message(meeting: Meeting) -> str:
+        attendee_count = max(len([item for item in meeting.attendees if item != "MeetIntel Agent"]), 0)
+        agent_line = (
+            " MeetIntel Core is attached and will capture notes plus action items."
+            if meeting.agent_joined
+            else " The meeting will proceed without an AI attendee."
+        )
+        return (
+            f"I scheduled '{meeting.title}' on {meeting.date_label} at {meeting.time_label} via {meeting.provider}. "
+            f"I included {attendee_count} attendee{'s' if attendee_count != 1 else ''}.{agent_line}"
+        )
+
+    @staticmethod
+    def _build_meeting_route_action(*, conversation_id: str, meeting: Meeting) -> dict:
+        trace = [
+            "Nexus Orchestrator classified the request as meeting scheduling.",
+            f"Action Exec Alpha booked {meeting.provider} for {meeting.date_label} at {meeting.time_label}.",
+            (
+                "MeetIntel Core was assigned to join, transcribe, and extract actions."
+                if meeting.agent_joined
+                else "The user opted to skip AI attendance for this meeting."
+            ),
+        ]
+        return {
+            "type": "handoff",
+            "targetTab": "meetings",
+            "targetAgentId": "ag-intel" if meeting.agent_joined else "ag-executor",
+            "conversationId": conversation_id,
+            "ctaLabel": "Open Meetings Workspace",
+            "title": "Meeting Scheduled",
+            "description": f"{meeting.title} is ready in the Meetings workspace.",
+            "prefill": {
+                "title": meeting.title,
+                "provider": meeting.provider,
+                "date": meeting.date_label,
+                "time": meeting.time_label,
+                "attendees": meeting.attendees,
+                "agentJoin": meeting.agent_joined,
+            },
+            "trace": trace,
+        }
+
+    def _alias_for_agent_id(self, agent_id: str) -> str | None:
+        return next((alias for alias, value in self.alias_map.items() if value == agent_id), None)
+
+    def _tool_requests_for_direct_agent(self, agent_id: str, message: str) -> list[tuple[str, str, dict]]:
+        alias = self._alias_for_agent_id(agent_id)
+        if alias == "intel":
+            return [("Notes Workspace", "summarize_meeting", {"query": message})]
+        if alias == "retrieval":
+            return [("Knowledge Base", "retrieve_context", {"query": message})]
+        if alias == "executor":
+            return [("Task Manager", "route_workflow", {"request": message})]
+        if alias == "verifier":
+            return [("Compliance Vault", "run_check", {"query": message})]
+        return []
 
     async def _delegate_to_agent(
         self,
@@ -846,6 +1669,8 @@ class AgentCoordinator:
             "targetAgentId": "workspace:onboarding",
             "conversationId": conversation_id,
             "ctaLabel": "Continue In Onboarding Workspace",
+            "title": "Specialist Handoff",
+            "description": "Nexus Orchestrator routed this goal to the Onboarding Agent workspace.",
             "prefill": prefill,
             "trace": trace,
         }
@@ -1038,6 +1863,14 @@ class AgentCoordinator:
             int((completed_at - run.started_at).total_seconds() * 1000),
             1,
         )
+
+    @staticmethod
+    def _filter_emails(attendees: list[str]) -> list[str]:
+        """Return only items that look like real email addresses."""
+        return [
+            a for a in attendees
+            if "@" in a and "." in a.split("@")[-1] and a.strip() != ""
+        ]
 
     @staticmethod
     def _build_specialist_summary(agent_name: str, tool_calls: list[dict]) -> str:
