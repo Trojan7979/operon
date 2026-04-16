@@ -1,4 +1,4 @@
-﻿# NexusCore
+# NexusCore
 
 NexusCore is a multi-agent enterprise productivity assistant:
 
@@ -6,14 +6,26 @@ NexusCore is a multi-agent enterprise productivity assistant:
 
 It combines a React demo UI with a FastAPI backend that models agent orchestration, workflow execution, structured data retrieval, meetings intelligence, and MCP-style tool integrations.
 
+## The Problem
+
+Enterprise work is fragmented across chat, calendars, approvals, notes, compliance checks, and internal systems. NexusCore is designed to reduce the overhead of switching between those systems by giving users a single multi-agent interface that can:
+
+- route requests to the right specialist agent
+- retrieve context before actions are taken
+- coordinate approvals, follow-ups, and workflow steps
+- summarize meetings and extract actions without losing auditability
+
+In short, it addresses the pain point of operational work being spread across too many disconnected tools and handoffs.
+
 ## What It Demonstrates
 
 - a primary orchestration agent coordinating specialist sub-agents
 - persistent conversation, agent task, run, handoff, and tool invocation records
 - JWT-based API authentication with refresh-token sessions
 - workflow orchestration for task routing, approvals, onboarding, and escalations
-- meetings analysis and extracted action items
-- MCP-style tool integration boundaries for calendar, task, notes, knowledge, and compliance systems
+- meetings analysis with Vertex AI extraction and heuristic fallback
+- **real Google Meet scheduling** via the MCP Python SDK when `ENABLE_GOOGLE_CALENDAR_MCP=true` — wired into both the REST endpoint and the orchestrator chat path
+- LLM-powered intent routing with a strict typed JSON schema, relative date conversion, and deterministic fallback
 - frontend-to-backend API interaction through a live demo interface
 
 ## Multi-Agent Model
@@ -52,7 +64,8 @@ This makes the collaboration visible both in backend APIs and in the frontend ch
   - agent collaboration handoffs
   - invoked tools
   - frontend API activity trace
-- meeting scheduling and meeting analysis
+- meeting scheduling via chat or REST — Google Meet events created with real Calendar invites when MCP is enabled
+- transcript analysis and action item extraction (Vertex AI + heuristic fallback)
 - RBAC and SLA demo views
 
 ## Repo Layout
@@ -109,6 +122,7 @@ Good prompts for showing agent collaboration in the UI:
 - `Run a compliance check for the procurement request`
 - `Find employee onboarding status for Priya Nair`
 - `Summarize the latest meeting and extract action items`
+- `Schedule a Google Meet called Q2 Planning on 2026-04-20 at 3:00 PM with sarah@nexuscore.ai`
 
 Best UI demo flow:
 
@@ -120,22 +134,25 @@ Best UI demo flow:
    - `Agent Collaboration`
    - `Tool Activity`
    - `API Activity`
-5. Switch to `Live Simulator` or `Workflows` to show backend-backed workflow state.
+5. Switch to `Meetings` — schedule a Google Meet from chat and verify the Calendar invite.
+6. Run `Analyze` on a meeting to show Vertex AI transcript extraction.
+7. Switch to `Live Simulator` or `Workflows` to show backend-backed workflow state.
 
 ## API Surface
 
-Current backend includes production-shaped Phase 1 endpoints for:
+Current backend includes production-shaped endpoints for:
 
-- auth
-- chat and conversations
-- workflows
-- agents
-- meetings
-- metrics
-- audit logs
-- MCP tool status/connectivity
+- auth (`POST /api/v1/auth/login`, `POST /api/v1/auth/token`, `GET /api/v1/auth/me`)
+- chat and conversations (`POST /api/v1/chat/message`, `GET /api/v1/chat/conversations`)
+- workflows (`GET /api/v1/workflows`, `POST /api/v1/workflows/{id}/advance`)
+- agents (`GET /api/v1/agents`, `GET /api/v1/agents/{id}/metrics`, `POST /api/v1/agents/{id}/task`)
+- meetings (`GET /api/v1/meetings`, `POST /api/v1/meetings`, `POST /api/v1/meetings/{id}/analyze`)
+- metrics, audit logs, RBAC, SLA
+- MCP tool status/connectivity (`GET /api/v1/mcp/tools`, `POST /api/v1/mcp/tools/{name}/connect`)
 
-OpenAPI docs are available at `/docs` when the backend is running.
+> The primary chat endpoint is `POST /api/v1/chat/message`. A silent alias at `POST /api/v1/chat` also works but is hidden from Swagger (`include_in_schema=False`).
+
+OpenAPI docs are available at `http://127.0.0.1:8000/docs` when the backend is running.
 
 ## Tech Stack
 
@@ -145,8 +162,33 @@ OpenAPI docs are available at `/docs` when the backend is running.
 - AI: Vertex AI with Gemini 2.5 Flash
 - Deployment target: Cloud Run
 
+## Agent's Toolkit
+
+This implementation uses a custom multi-agent orchestration layer instead of a framework like LangChain, AutoGen, or CrewAI.
+
+- Orchestration: custom `AgentCoordinator` service for routing, handoffs, workflow creation, and specialist-agent coordination
+- LLM gateway: Vertex AI via `google-cloud-aiplatform` and `google-generativeai`
+- API layer: FastAPI
+- Data modeling and persistence: Pydantic, SQLAlchemy, SQLite
+- Auth and sessions: `python-jose`, `passlib`, JWT access tokens, refresh-session records
+- Tool integrations: MCP Python SDK (`mcp[cli]`) plus a database-backed MCP-style tool registry
+- External scheduling path: Google Calendar APIs via `google-api-python-client` and OAuth helpers
+- Frontend demo client: React, Vite, Tailwind CSS
+
+## Assumptions & Guardrails
+
+- The system uses a fixed agent catalog and fixed allowed intents, so the model cannot invent arbitrary agent roles or routing targets.
+- LLM-based routing uses a typed JSON schema prompt (field types, `YYYY-MM-DD` date format, `HH:MM` / `H:MM AM/PM` time format, boolean flags). If the response is malformed or Vertex AI is unavailable, the backend falls back to deterministic rule-based routing with no degradation.
+- The final response prompt explicitly tells the model to ground answers in tool outcomes and collaboration history and not invent IDs, data, or completed actions.
+- When available context is incomplete, the backend asks for clarification before proceeding — enforced for meeting scheduling (title, provider, date, time all required), onboarding, workflows, compliance checks, and retrieval requests.
+- Actions are bounded by registered tools and persisted tool invocations rather than open-ended execution. The agent can only act through known MCP-style integrations exposed by the backend.
+- Safe fallback behavior is built in: if Vertex AI is unavailable, chat falls back to deterministic orchestration copy; meeting analysis falls back to heuristic keyword extraction.
+- Real external side effects are currently limited to Google Calendar / Google Meet scheduling. This path is active in **both** the orchestrator chat flow and the direct REST API when `ENABLE_GOOGLE_CALENDAR_MCP=true`. The rest of the tool surface (Task Manager, Notes Workspace, Compliance Vault, Knowledge Base) remains demo-scoped with stub registry responses.
+- On MCP failure the backend logs a `warning` audit entry and continues with a DB-only meeting record — the booking is never silently dropped.
+
 ## Notes
 
-- The current multi-agent system is orchestrator-led and persistence-backed.
-- MCP is represented through a registry boundary today and can be upgraded to real MCP SDK-based integrations next.
-- This repository serves as the initial version of this iteration and is intended for demonstration purposes, including API and UI walkthroughs.
+- The multi-agent system is orchestrator-led and fully persistence-backed (conversations, runs, tasks, handoffs, tool invocations, audit logs).
+- The Google Calendar MCP path uses the MCP Python SDK (`stdio_client`) to spawn `app.mcp_servers.google_calendar` as a subprocess — the same pattern that would be used to connect any future real MCP server.
+- Other tool servers (`mcp_task_server`, `mcp_notes_server`, etc.) are registered in `config.py` and ready to be connected using the same stdio pattern once the server modules are built.
+- This repository is the initial iteration and is intended for demonstration and continued development.
