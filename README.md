@@ -166,13 +166,15 @@ OpenAPI docs are available at `http://127.0.0.1:8000/docs` when the backend is r
 
 This implementation uses a custom multi-agent orchestration layer instead of a framework like LangChain, AutoGen, or CrewAI.
 
-- Orchestration: custom `AgentCoordinator` service for routing, handoffs, workflow creation, and specialist-agent coordination
+- Orchestration: custom `AgentCoordinator` service for typed intent routing, handoffs, workflow creation, specialist-agent coordination, and draft-state continuation
 - LLM gateway: Vertex AI via `google-cloud-aiplatform` and `google-generativeai`
 - API layer: FastAPI
 - Data modeling and persistence: Pydantic, SQLAlchemy, SQLite
 - Auth and sessions: `python-jose`, `passlib`, JWT access tokens, refresh-session records
-- Tool integrations: MCP Python SDK (`mcp[cli]`) plus a database-backed MCP-style tool registry
-- External scheduling path: Google Calendar APIs via `google-api-python-client` and OAuth helpers
+- Agent observability: persisted conversations, agent runs, tasks, handoffs, tool invocations, and audit logs exposed through the agent API
+- Tool integrations: MCP Python SDK (`mcp[cli]`) plus a database-backed MCP-style tool registry for demo-scoped tools
+- External scheduling path: Google Calendar APIs via `google-api-python-client` and OAuth helpers; Calendar sends attendee invites when `sendUpdates=all`
+- Employee directory: SQLAlchemy-backed employee records used to resolve group meeting attendees such as `@all_employees` and `@dept:Engineering`
 - Frontend demo client: React, Vite, Tailwind CSS
 
 ## Assumptions & Guardrails
@@ -181,9 +183,12 @@ This implementation uses a custom multi-agent orchestration layer instead of a f
 - LLM-based routing uses a typed JSON schema prompt (field types, `YYYY-MM-DD` date format, `HH:MM` / `H:MM AM/PM` time format, boolean flags). If the response is malformed or Vertex AI is unavailable, the backend falls back to deterministic rule-based routing with no degradation.
 - The final response prompt explicitly tells the model to ground answers in tool outcomes and collaboration history and not invent IDs, data, or completed actions.
 - When available context is incomplete, the backend asks for clarification before proceeding — enforced for meeting scheduling (title, provider, date, time all required), onboarding, workflows, compliance checks, and retrieval requests.
-- Actions are bounded by registered tools and persisted tool invocations rather than open-ended execution. The agent can only act through known MCP-style integrations exposed by the backend.
+- Actions are bounded by registered tools and persisted tool invocations rather than open-ended execution. The agent can only act through known MCP-style integrations exposed by the backend, and agent-task assignment rejects unavailable agents.
+- Conversation-scoped access checks prevent users from assigning agent tasks into conversations they do not own.
 - Safe fallback behavior is built in: if Vertex AI is unavailable, chat falls back to deterministic orchestration copy; meeting analysis falls back to heuristic keyword extraction.
-- Real external side effects are currently limited to Google Calendar / Google Meet scheduling. This path is active in **both** the orchestrator chat flow and the direct REST API when `ENABLE_GOOGLE_CALENDAR_MCP=true`. The rest of the tool surface (Task Manager, Notes Workspace, Compliance Vault, Knowledge Base) remains demo-scoped with stub registry responses.
+- Real external side effects are currently limited to Google Calendar / Google Meet scheduling. This path is active in **both** the orchestrator chat flow and the direct REST API when `ENABLE_GOOGLE_CALENDAR_MCP=true`; SMTP meeting-email settings are configuration-only until a separate notification sender is wired in. The rest of the tool surface (Task Manager, Notes Workspace, Compliance Vault, Knowledge Base) remains demo-scoped with stub registry responses.
+- Meeting attendee guardrails filter invite targets to real-looking email addresses, add the requester as organizer/attendee when needed, and resolve group markers from active employee records before creating Calendar events.
+- Employee updates enforce unique lowercased emails and allowed status transitions (`onboarding -> active/terminated`, `active -> terminated`, `terminated -> terminated`) unless an explicit force override is used.
 - On MCP failure the backend logs a `warning` audit entry and continues with a DB-only meeting record — the booking is never silently dropped.
 
 ## Notes
