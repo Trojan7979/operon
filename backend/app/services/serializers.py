@@ -17,6 +17,7 @@ from app.db.models import (
     Workflow,
     WorkflowStep,
 )
+from app.services.employees import serialize_employee_start_date
 
 
 DEMO_STEP_ENRICHMENTS = {
@@ -325,7 +326,7 @@ def serialize_employee(employee: Employee) -> dict:
         "email": employee.email,
         "phone": employee.phone,
         "location": employee.location,
-        "startDate": employee.start_date_label,
+        "startDate": serialize_employee_start_date(employee.start_date),
         "status": employee.status,
         "progress": employee.progress,
         "avatar": employee.avatar,

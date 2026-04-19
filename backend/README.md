@@ -14,10 +14,12 @@ What is already live:
 - Live RBAC and SLA endpoints
 - Vertex AI-backed chat responses with safe fallback behavior
 - Temporary low-cost Vertex probe endpoint for development testing
+- Optional MCP-based Google Meet scheduling path for the Meetings API
 
 What is still demo-oriented:
 
 - The MCP registry is stubbed and not yet connected to real external MCP servers
+- Only the Google Meet scheduling path is wired for a real MCP server in this iteration
 - SQLite is used locally instead of Cloud SQL / Postgres
 - Some workflow intelligence is demo-enriched at serialization time to make the UI stronger for the recording
 
@@ -76,6 +78,16 @@ ENABLE_VERTEX_AI=true
 ENABLE_DEV_LLM_ENDPOINT=true
 ```
 
+Google Meet MCP local config:
+
+```env
+ENABLE_GOOGLE_CALENDAR_MCP=true
+GOOGLE_CALENDAR_CLIENT_SECRET_PATH=C:\path\to\google-oauth-client.json
+GOOGLE_CALENDAR_TOKEN_PATH=.secrets/google-calendar-token.json
+GOOGLE_CALENDAR_ID=primary
+GOOGLE_CALENDAR_TIMEZONE=UTC
+```
+
 ## Google Auth For Vertex
 
 For local development, use Application Default Credentials:
@@ -113,6 +125,7 @@ $env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\service-account.json"
 - `POST /api/v1/meetings/{meeting_id}/analyze`
 - `GET /api/v1/employees`
 - `POST /api/v1/employees`
+- `PATCH /api/v1/employees/{employee_id}`
 - `GET /api/v1/rbac/users`
 - `POST /api/v1/rbac/users`
 - `PATCH /api/v1/rbac/users/{user_id}`
@@ -136,6 +149,16 @@ Vertex AI is currently used in these places:
   Temporary low-cost endpoint for validating model access and response behavior.
 
 If Vertex is unavailable, chat falls back to deterministic orchestration copy and meetings fall back to heuristic extraction.
+
+## MCP Google Meet Scheduling
+
+For this iteration, `POST /api/v1/meetings` can schedule real Google Meet calls through a local MCP server when:
+
+- `ENABLE_GOOGLE_CALENDAR_MCP=true`
+- `GOOGLE_CALENDAR_CLIENT_SECRET_PATH` points to a Google OAuth desktop client JSON file
+- attendee entries are valid email addresses
+
+The backend launches `app.mcp_servers.google_calendar` over stdio via the MCP Python SDK, creates the Calendar event with Google Meet conference data, and requests Google Calendar to send attendee email invitations using `sendUpdates=all`.
 
 ## Recommended Demo Flow
 

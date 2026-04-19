@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,7 @@ from app.db.models import (
     Workflow,
     WorkflowStep,
 )
+from app.services.employees import EmployeeStatus
 
 
 ROLE_TEMPLATES = {
@@ -73,6 +74,7 @@ ROLE_TEMPLATES = {
 
 
 async def seed_database(session: AsyncSession) -> None:
+    seed_now = datetime.now(UTC)
     existing_user = await session.scalar(select(User.id).limit(1))
     if existing_user:
         await seed_phase1_extensions(session)
@@ -279,10 +281,10 @@ async def seed_database(session: AsyncSession) -> None:
         )
 
     employees = [
-        ("emp-1", "Taniya Kundu", "Senior Engineer", "Engineering", "taniya.kundu@nexuscore.ai", "+1 (555) 234-5678", "San Francisco, CA", "Apr 15, 2026", "onboarding", 75, "TK"),
-        ("emp-2", "Rupam Jana", "Backend Lead", "Engineering", "rupam.jana@nexuscore.ai", "+1 (555) 567-8901", "New York, NY", "Jan 10, 2026", "active", 100, "RJ"),
-        ("emp-3", "James Rodriguez", "Product Manager", "Product", "james.rodriguez@nexuscore.ai", "+1 (555) 345-6789", "Seattle, WA", "Mar 01, 2026", "active", 100, "JR"),
-        ("emp-4", "Cassandra Vale", "UX Designer", "Design", "cassandra.vale@nexuscore.ai", "+1 (555) 456-7890", "Austin, TX", "Feb 15, 2026", "active", 100, "CV"),
+        ("emp-1", "Taniya Kundu", "Senior Engineer", "Engineering", "taniya.kundu@nexuscore.ai", "+1 (555) 234-5678", "San Francisco, CA", seed_now + timedelta(days=2), EmployeeStatus.ONBOARDING, 75, "TK"),
+        ("emp-2", "Rupam Jana", "Backend Lead", "Engineering", "rupam.jana@nexuscore.ai", "+1 (555) 567-8901", "New York, NY", seed_now - timedelta(days=90), EmployeeStatus.ACTIVE, 100, "RJ"),
+        ("emp-3", "James Rodriguez", "Product Manager", "Product", "james.rodriguez@nexuscore.ai", "+1 (555) 345-6789", "Seattle, WA", seed_now - timedelta(days=49), EmployeeStatus.ACTIVE, 100, "JR"),
+        ("emp-4", "Cassandra Vale", "UX Designer", "Design", "cassandra.vale@nexuscore.ai", "+1 (555) 456-7890", "Austin, TX", seed_now - timedelta(days=63), EmployeeStatus.ACTIVE, 100, "CV"),
     ]
     for employee in employees:
         session.add(
@@ -294,7 +296,7 @@ async def seed_database(session: AsyncSession) -> None:
                 email=employee[4],
                 phone=employee[5],
                 location=employee[6],
-                start_date_label=employee[7],
+                start_date=employee[7],
                 status=employee[8],
                 progress=employee[9],
                 avatar=employee[10],

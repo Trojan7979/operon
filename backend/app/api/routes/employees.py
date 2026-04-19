@@ -1,13 +1,22 @@
-from uuid import uuid4
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.db.models import AuditLog, Employee, User, Workflow, WorkflowStep
+from app.db.models import User
 from app.db.session import get_db_session
-from app.schemas import CreateEmployeeRequest, EmployeeOut
+from app.schemas import CreateEmployeeRequest, EmployeeOut, UpdateEmployeeRequest
+from app.services.employees import (
+    EmployeeDomainError,
+    EmployeeConflictError,
+    EmployeeStatus,
+    create_employee_record,
+    create_onboarding_workflow_artifacts,
+    get_employee,
+    list_employees as list_employees_query,
+    update_employee_record,
+)
 from app.services.serializers import serialize_employee
 
 router = APIRouter()
@@ -15,87 +24,112 @@ router = APIRouter()
 
 @router.get("", response_model=list[EmployeeOut])
 async def list_employees(
+    employee_status: Annotated[EmployeeStatus | None, Query(alias="status")] = None,
+    department: str | None = None,
     _: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[EmployeeOut]:
-    employees = list(await session.scalars(select(Employee).order_by(Employee.name)))
+    employees = await list_employees_query(
+        session,
+        employee_status=employee_status,
+        department=department,
+    )
     return [EmployeeOut.model_validate(serialize_employee(employee)) for employee in employees]
 
 
 @router.post("", response_model=EmployeeOut, status_code=201)
 async def create_employee(
     payload: CreateEmployeeRequest,
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> EmployeeOut:
-    existing_employee = await session.scalar(select(Employee).where(Employee.email == payload.email))
-    if existing_employee is not None:
+    try:
+        employee = await create_employee_record(
+            session,
+            name=payload.name,
+            role=payload.role,
+            department=payload.department,
+            email=payload.email,
+            phone=payload.phone,
+            location=payload.location,
+            start_date=payload.startDate,
+            photo_url=payload.photoUrl,
+            status=EmployeeStatus.ONBOARDING,
+        )
+        await create_onboarding_workflow_artifacts(
+            session,
+            employee_name=payload.name,
+            department=payload.department,
+            agent_name=current_user.name,
+        )
+        await session.commit()
+    except EmployeeConflictError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except EmployeeDomainError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    await session.refresh(employee)
+    return EmployeeOut.model_validate(serialize_employee(employee))
+
+
+@router.patch("/{employee_id}", response_model=EmployeeOut)
+async def update_employee(
+    employee_id: str,
+    payload: UpdateEmployeeRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> EmployeeOut:
+    employee = await get_employee(session, employee_id)
+    if employee is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found.")
+
+    raw_updates = payload.model_dump(exclude_unset=True)
+    force_status_override = raw_updates.pop("forceStatusOverride", False)
+    if not raw_updates:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"An employee with email {payload.email} already exists.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one employee field must be updated.",
         )
 
-    employee = Employee(
-        id=f"emp-{uuid4().hex[:8]}",
-        name=payload.name,
-        role=payload.role,
-        department=payload.department,
-        email=payload.email,
-        phone=payload.phone,
-        location=payload.location,
-        start_date_label=payload.startDate,
-        status="onboarding",
-        progress=100,
-        avatar="".join(part[0] for part in payload.name.split()[:2]).upper(),
-        photo_url=payload.photoUrl,
-    )
-    session.add(employee)
+    mapped_updates: dict = {}
+    if "name" in raw_updates:
+        mapped_updates["name"] = raw_updates["name"]
+    if "role" in raw_updates:
+        mapped_updates["role"] = raw_updates["role"]
+    if "department" in raw_updates:
+        mapped_updates["department"] = raw_updates["department"]
+    if "email" in raw_updates:
+        mapped_updates["email"] = raw_updates["email"]
+    if "phone" in raw_updates:
+        mapped_updates["phone"] = raw_updates["phone"]
+    if "location" in raw_updates:
+        mapped_updates["location"] = raw_updates["location"]
+    if "startDate" in raw_updates:
+        mapped_updates["start_date"] = raw_updates["startDate"]
+    if "status" in raw_updates:
+        mapped_updates["status"] = raw_updates["status"]
+    if "progress" in raw_updates:
+        mapped_updates["progress"] = raw_updates["progress"]
+    if "photoUrl" in raw_updates:
+        mapped_updates["photo_url"] = raw_updates["photoUrl"]
 
-    workflow = Workflow(
-        id=f"wf-{uuid4().hex[:6]}",
-        workflow_type="Employee Onboarding",
-        name=f"{payload.name} ({payload.department})",
-        status="completed",
-        health=100,
-        progress=100,
-        current_step="Onboarding Complete",
-        assigned_agent="Shield Verifier",
-        prediction="Automated onboarding completed successfully.",
-    )
-    session.add(workflow)
-
-    steps = [
-        ("Identity Verification", "Shield Verifier"),
-        ("Background Check Initiated", "Data Fetcher v4"),
-        ("Google Workspace Account Created", "Action Exec Alpha"),
-        ("Slack and GitHub Provisioned", "Action Exec Alpha"),
-        ("Hardware Request Submitted", "Nexus Orchestrator"),
-        ("Manager Notification Sent", "Action Exec Alpha"),
-        ("Day 1 Calendar Created", "Action Exec Alpha"),
-        ("Onboarding Complete", "Shield Verifier"),
-    ]
-    for index, (name, agent) in enumerate(steps, start=1):
-        session.add(
-            WorkflowStep(
-                workflow_id=workflow.id,
-                position=index,
-                name=name,
-                agent=agent,
-                status="completed",
-                time_label="auto",
-            )
+    try:
+        await update_employee_record(
+            session,
+            employee,
+            updates=mapped_updates,
+            actor_name=current_user.name,
+            force_status_override=force_status_override,
         )
+        await session.commit()
+    except EmployeeConflictError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except EmployeeDomainError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    session.add(
-        AuditLog(
-            id=f"log-{uuid4().hex[:10]}",
-            time_label="auto",
-            log_type="action",
-            agent="Nexus Orchestrator",
-            message=f"Completed onboarding workflow for {payload.name}.",
-        )
-    )
-
-    await session.commit()
     await session.refresh(employee)
     return EmployeeOut.model_validate(serialize_employee(employee))

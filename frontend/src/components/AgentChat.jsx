@@ -33,15 +33,22 @@ function RouteActionCard({ action, onContinue }) {
   const [showTrace, setShowTrace] = useState(false);
   const captured = Object.entries(action.prefill ?? {})
     .filter(([, value]) => value)
-    .filter(([key]) => !['phone', 'location'].includes(key));
+    .filter(([key]) => !['phone', 'location', 'attendees'].includes(key));
+
+  const title = action.title ?? (action.targetTab === 'meetings' ? 'Meeting Automation' : 'Specialist Handoff');
+  const description =
+    action.description ??
+    (action.targetTab === 'meetings'
+      ? 'Nexus Orchestrator completed the scheduling flow and prepared the Meetings workspace.'
+      : 'Nexus Orchestrator routed this goal to a specialist workspace.');
 
   return (
     <div className="mt-3 rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-3">
       <p className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300">
-        Specialist Handoff
+        {title}
       </p>
       <p className="mt-1 text-xs text-zinc-300">
-        Nexus Orchestrator routed this goal to the Onboarding Agent workspace.
+        {description}
       </p>
       {captured.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-2">

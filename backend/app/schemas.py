@@ -1,4 +1,8 @@
-from pydantic import BaseModel, ConfigDict, Field
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.services.employees import EmployeeStatus, coerce_employee_start_date
 
 
 class ORMModel(BaseModel):
@@ -278,7 +282,7 @@ class EmployeeOut(BaseModel):
     phone: str
     location: str
     startDate: str
-    status: str
+    status: EmployeeStatus
     progress: int
     avatar: str
     photo: str | None = None
@@ -291,8 +295,34 @@ class CreateEmployeeRequest(BaseModel):
     email: str
     phone: str = ""
     location: str = ""
-    startDate: str
+    startDate: datetime
     photoUrl: str | None = None
+
+    @field_validator("startDate", mode="before")
+    @classmethod
+    def validate_start_date(cls, value):
+        return coerce_employee_start_date(value)
+
+
+class UpdateEmployeeRequest(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    department: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    location: str | None = None
+    startDate: datetime | None = None
+    status: EmployeeStatus | None = None
+    progress: int | None = Field(default=None, ge=0, le=100)
+    photoUrl: str | None = None
+    forceStatusOverride: bool = False
+
+    @field_validator("startDate", mode="before")
+    @classmethod
+    def validate_optional_start_date(cls, value):
+        if value is None:
+            return None
+        return coerce_employee_start_date(value)
 
 
 class WorkflowExecutionResponse(BaseModel):

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import Enum as PyEnum
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
+
+
+class EmployeeStatus(str, PyEnum):
+    ONBOARDING = "onboarding"
+    ACTIVE = "active"
+    TERMINATED = "terminated"
 
 
 class SystemMetric(Base):
@@ -277,11 +284,53 @@ class Employee(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     phone: Mapped[str] = mapped_column(String(64), default="")
     location: Mapped[str] = mapped_column(String(120), default="")
-    start_date_label: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    start_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    status: Mapped[EmployeeStatus] = mapped_column(
+        SqlEnum(
+            EmployeeStatus,
+            name="employee_status",
+            native_enum=False,
+            validate_strings=True,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+        default=EmployeeStatus.ONBOARDING,
+        index=True,
+    )
     progress: Mapped[int] = mapped_column(Integer, default=0)
     avatar: Mapped[str] = mapped_column(String(8), nullable=False)
     photo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class EmployeeStatusTransitionLog(Base):
+    __tablename__ = "employee_status_transitions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.id"), index=True, nullable=False)
+    old_status: Mapped[EmployeeStatus] = mapped_column(
+        SqlEnum(
+            EmployeeStatus,
+            name="employee_status",
+            native_enum=False,
+            validate_strings=True,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+    )
+    new_status: Mapped[EmployeeStatus] = mapped_column(
+        SqlEnum(
+            EmployeeStatus,
+            name="employee_status",
+            native_enum=False,
+            validate_strings=True,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+    )
+    transitioned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    triggered_by: Mapped[str] = mapped_column(String(120), nullable=False)
 
 
 class SlaRecord(Base):

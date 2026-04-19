@@ -9,11 +9,13 @@ from app.api.deps import get_current_user
 from app.db.models import AuditLog, Meeting, MeetingItem, User
 from app.db.session import get_db_session
 from app.schemas import MeetingItemOut, MeetingOut, ScheduleMeetingRequest
+from app.services.mcp_calendar import GoogleCalendarMcpClient, build_google_meet_datetimes
 from app.services.serializers import serialize_meeting
 from app.services.vertex import VertexGateway
 
 router = APIRouter()
 vertex = VertexGateway()
+google_calendar_mcp = GoogleCalendarMcpClient()
 
 
 def heuristic_extract(lines: list[dict]) -> list[dict]:
@@ -45,6 +47,18 @@ def heuristic_extract(lines: list[dict]) -> list[dict]:
                 }
             )
     return items[:8]
+
+
+def _normalize_attendee_emails(attendees: list[str], organizer_email: str) -> list[str]:
+    normalized = []
+    for value in attendees:
+        email = value.strip()
+        if email and "@" in email and email.lower() not in {item.lower() for item in normalized}:
+            normalized.append(email)
+
+    if organizer_email and organizer_email.lower() not in {item.lower() for item in normalized}:
+        normalized.insert(0, organizer_email)
+    return normalized
 
 
 @router.get("", response_model=list[MeetingOut])
@@ -84,7 +98,42 @@ async def schedule_meeting(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> MeetingOut:
-    attendees = payload.attendees or [current_user.name]
+    attendees = payload.attendees or [current_user.email]
+    audit_agent = "Action Exec Alpha"
+
+    if payload.provider == "gmeet" and google_calendar_mcp.enabled:
+        attendee_emails = _normalize_attendee_emails(attendees, current_user.email)
+        if not attendee_emails:
+            raise HTTPException(
+                status_code=400,
+                detail="Google Meet scheduling requires at least one valid attendee email.",
+            )
+
+        try:
+            start_iso, end_iso = build_google_meet_datetimes(payload.date, payload.time)
+            scheduled = await google_calendar_mcp.schedule_google_meet(
+                title=payload.title,
+                start_iso=start_iso,
+                end_iso=end_iso,
+                attendee_emails=attendee_emails,
+                description="Scheduled from NexusCore via MCP.",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Unable to schedule Google Meet via MCP. {exc}",
+            ) from exc
+
+        attendees = scheduled.attendee_emails or attendee_emails
+    elif payload.provider == "gmeet" and not google_calendar_mcp.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Google Meet MCP scheduling is not enabled. Set ENABLE_GOOGLE_CALENDAR_MCP=true "
+                "and configure Google Calendar credentials."
+            ),
+        )
+
     if payload.agentJoin:
         attendees = [*attendees, "MeetIntel Agent"]
 
@@ -106,7 +155,7 @@ async def schedule_meeting(
             id=f"log-{uuid4().hex[:10]}",
             time_label="scheduled",
             log_type="event",
-            agent="Nexus Orchestrator",
+            agent=audit_agent,
             message=f"Scheduled meeting '{meeting.title}' on {meeting.date_label} via {meeting.provider}.",
         )
     )

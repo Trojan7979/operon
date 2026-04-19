@@ -40,13 +40,11 @@ async def resolve_agent(session: AsyncSession, agent_id: str) -> Agent:
         raise HTTPException(status_code=404, detail="Agent not found.")
     return agent
 
-
 async def resolve_workflow(session: AsyncSession, workflow_id: str) -> Workflow:
     workflow = await session.get(Workflow, workflow_id)
     if workflow is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
     return workflow
-
 
 async def resolve_conversation(
     session: AsyncSession,
