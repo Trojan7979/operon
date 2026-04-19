@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     vertex_ai_model: str = "gemini-2.5-flash"
     enable_vertex_ai: bool = False
     enable_dev_llm_endpoint: bool = False
+    enable_google_calendar_mcp: bool = False
+    google_calendar_client_secret_path: str | None = None
+    google_calendar_token_path: str = ".secrets/google-calendar-token.json"
+    google_calendar_id: str = "primary"
+    google_calendar_timezone: str = "Asia/Kolkata"
 
     database_url: str = "sqlite+aiosqlite:///./operon.db"
 
@@ -23,6 +28,7 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 14
+    employee_status_sync_interval_seconds: int = 300
 
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [

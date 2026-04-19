@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.db.models import (
     Agent,
     AgentHandoff,
@@ -24,6 +26,12 @@ from app.db.models import (
     User,
     Workflow,
     WorkflowStep,
+)
+from app.services.employees import (
+    EmployeeStatus,
+    coerce_employee_start_date,
+    create_employee_record,
+    create_onboarding_workflow_artifacts,
 )
 from app.services.mcp_calendar import GoogleCalendarMcpClient, build_google_meet_datetimes
 from app.services.vertex import VertexGateway
@@ -219,6 +227,7 @@ class AgentCoordinator:
         self.vertex_gateway = VertexGateway()
         self.google_calendar_mcp = GoogleCalendarMcpClient()
         self.onboarding_drafts: dict[str, OnboardingDraft] = {}
+        self.meeting_schedule_drafts: dict[str, MeetingScheduleDraft] = {}
 
     async def get_agents(self, session: AsyncSession) -> list[Agent]:
         result = await session.scalars(select(Agent).order_by(Agent.name))
@@ -283,6 +292,17 @@ class AgentCoordinator:
             requested_agent=agent,
             message=message,
         )
+        meeting_draft_key = conversation.id
+        routing_plan = self._merge_with_meeting_schedule_draft(
+            draft_key=meeting_draft_key,
+            message=message,
+            routing_plan=routing_plan,
+        )
+        if routing_plan.intent == "meeting_schedule" and routing_plan.meeting_schedule:
+            if routing_plan.needs_clarification:
+                self.meeting_schedule_drafts[meeting_draft_key] = routing_plan.meeting_schedule
+            else:
+                self.meeting_schedule_drafts.pop(meeting_draft_key, None)
         workflow_id = conversation.workflow_id
 
         fallback_message = (
@@ -361,6 +381,7 @@ class AgentCoordinator:
                 collaboration.extend(delegated_collaboration)
                 fallback_message = intel_response
 
+            self.meeting_schedule_drafts.pop(meeting_draft_key, None)
             fallback_message = self._build_meeting_scheduled_message(meeting)
             route_action = self._build_meeting_route_action(conversation_id=conversation.id, meeting=meeting)
         elif routing_plan.intent == "meeting_intelligence":
@@ -708,19 +729,11 @@ class AgentCoordinator:
         )
 
         if intent == "meeting_schedule":
-            missing_fields = meeting_schedule.missing_fields()
-            if missing_fields:
-                return AgentRoutingPlan(
-                    intent=intent,
-                    primary_agent_alias=primary_agent_alias,
-                    supporting_agent_aliases=supporting_agent_aliases,
-                    create_workflow=True,
-                    needs_clarification=True,
-                    clarification_message=self._build_missing_meeting_message(meeting_schedule),
-                    reasoning=self._clean_optional_text(payload.get("reasoning"))
-                    or "The request looks like meeting scheduling, but key booking details are still missing.",
-                    meeting_schedule=meeting_schedule,
-                )
+            return self._build_meeting_schedule_plan(
+                meeting_schedule,
+                reasoning=self._clean_optional_text(payload.get("reasoning"))
+                or "The request looks like meeting scheduling, but key booking details are still missing.",
+            )
 
         clarification_message = self._clean_optional_text(payload.get("clarificationMessage"))
         needs_clarification = bool(payload.get("needsClarification")) and bool(clarification_message)
@@ -767,25 +780,9 @@ class AgentCoordinator:
 
         if meeting_schedule:
             schedule = self._extract_meeting_schedule_from_text(message)
-            missing_fields = schedule.missing_fields()
-            if missing_fields:
-                return AgentRoutingPlan(
-                    intent="meeting_schedule",
-                    primary_agent_alias="executor",
-                    supporting_agent_aliases=["intel"],
-                    create_workflow=True,
-                    needs_clarification=True,
-                    clarification_message=self._build_missing_meeting_message(schedule),
-                    reasoning="This looks like a meeting scheduling request, but the booking details are incomplete.",
-                    meeting_schedule=schedule,
-                )
-            return AgentRoutingPlan(
-                intent="meeting_schedule",
-                primary_agent_alias="executor",
-                supporting_agent_aliases=["intel"] if schedule.agent_join else [],
-                create_workflow=True,
+            return self._build_meeting_schedule_plan(
+                schedule,
                 reasoning="This request needs meeting scheduling automation through the executor and meeting intelligence stack.",
-                meeting_schedule=schedule,
             )
 
         if clarification_message:
@@ -1309,17 +1306,75 @@ class AgentCoordinator:
                 schedule.title = f"{_cadence} {_fmt}"
         # ─────────────────────────────────────────────────────────────────────
 
-        iso_date_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", message)
-        if iso_date_match:
-            schedule.date = iso_date_match.group(0)
-        else:
-            named_date_match = re.search(
-                r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?\b",
-                message,
+        # ── Date resolution ──────────────────────────────────────────────────────
+        # Priority order:
+        #   1. Relative keywords  → tonight/today, tomorrow, next week
+        #   2. Explicit ISO date  → YYYY-MM-DD
+        #   3. Named/ordinal date → "Apr 29", "29th of April", "April 29th"
+        #   4. Implied day        → "on the 29th" (current month, else next month)
+        #
+        # Pre-process a cleaned copy of the message for steps 3-4 by stripping
+        # ordinal suffixes ("st/nd/rd/th") and "of" in a date context, so that
+        # "29th of April" → "29 April" and "April 29th" → "April 29".
+        _today = self._meeting_reference_now().date()
+        _date_msg = re.sub(
+            r"\b(\d{1,2})\s+of\s+",
+            r"\1 ",
+            re.sub(r"\b(\d{1,2})(?:st|nd|rd|th)\b", r"\1", message, flags=re.IGNORECASE),
+            flags=re.IGNORECASE,
+        )
+
+        # Step 1 – relative keywords
+        if re.search(r"\btonight\b|\btoday\b", lowered):
+            schedule.date = _today.isoformat()
+        elif re.search(r"\btomorrow\b|\btmr\b", lowered):
+            schedule.date = (_today + timedelta(days=1)).isoformat()
+        elif re.search(r"\bnext week\b", lowered):
+            schedule.date = (_today + timedelta(days=7)).isoformat()
+
+        # Step 2 – explicit ISO date
+        if not schedule.date:
+            _iso_m = re.search(r"\b\d{4}-\d{2}-\d{2}\b", message)
+            if _iso_m:
+                schedule.date = _iso_m.group(0)
+
+        # Step 3 – named or ordinal month date from the cleaned message
+        if not schedule.date:
+            _named_m = re.search(
+                r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?\b"
+                r"|\b\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*(?:,\s*\d{4})?\b",
+                _date_msg,
                 re.IGNORECASE,
             )
-            if named_date_match:
-                schedule.date = named_date_match.group(0)
+            if _named_m:
+                _raw = _named_m.group(0).strip()
+                for _fmt in ["%b %d", "%B %d", "%d %b", "%d %B"]:
+                    try:
+                        schedule.date = datetime.strptime(
+                            f"{_raw} {_today.year}", f"{_fmt} %Y"
+                        ).date().isoformat()
+                        break
+                    except ValueError:
+                        continue
+
+        # Step 4 – implied day of month: "on the 29th", "the 29th"
+        if not schedule.date:
+            _day_m = re.search(
+                r"\b(?:on\s+)?the\s+(\d{1,2})(?:st|nd|rd|th)?\b", message, re.IGNORECASE
+            )
+            if _day_m:
+                _day = int(_day_m.group(1))
+                try:
+                    _target = _today.replace(day=_day)
+                    if _target < _today:
+                        # Day already passed this month — roll to next month
+                        _nm = _today.month % 12 + 1
+                        _ny = _today.year + (_today.month // 12)
+                        _target = _today.replace(year=_ny, month=_nm, day=_day)
+                    schedule.date = _target.isoformat()
+                except ValueError:
+                    pass  # invalid day for this month — leave date unset
+        # ────────────────────────────────────────────────────────────────────────
 
         time_match = re.search(r"\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?\b|\b\d{1,2}\s*(?:AM|PM|am|pm)\b", message)
         if time_match:
@@ -1337,17 +1392,38 @@ class AgentCoordinator:
 
     @staticmethod
     def _build_missing_meeting_message(schedule: MeetingScheduleDraft) -> str:
-        missing_fields = schedule.missing_fields()
-        label_map = {
-            "title": "meeting title",
-            "provider": "provider (Google Meet, Zoom, or Teams)",
-            "date": "date (e.g. Apr 25 or 2026-04-25)",
-            "time": "time (e.g. 8:00 PM)",
-        }
-        missing = ", ".join(label_map[field] for field in missing_fields)
+        """Build a humanlike, context-aware clarification message.
 
-        # Build a note when group attendee markers are present so the user
-        # knows they do not have to list names manually.
+        Acknowledges everything already extracted (title, date, time, attendees)
+        before asking only for the missing pieces.
+        """
+        missing_fields = schedule.missing_fields()
+
+        # ── Humanise the date for the response ───────────────────────────────
+        _today = datetime.now(UTC).date()
+        _date_display: str | None = None
+        if schedule.date:
+            try:
+                _parsed = datetime.fromisoformat(schedule.date).date()
+                if _parsed == _today:
+                    _date_display = "tonight"
+                elif _parsed == _today + timedelta(days=1):
+                    _date_display = "tomorrow"
+                else:
+                    _date_display = schedule.date
+            except ValueError:
+                _date_display = schedule.date
+
+        # ── Build the "already know" context blurb ───────────────────────────
+        known_parts: list[str] = []
+        if schedule.title:
+            known_parts.append(f"\"{schedule.title}\"")
+        if _date_display:
+            known_parts.append(f"for {_date_display}")
+        if schedule.time:
+            known_parts.append(f"at {schedule.time}")
+
+        # ── Attendee note ───────────────────────────────────────────────────
         group_markers = [
             a for a in schedule.attendees if isinstance(a, str) and a.startswith("@")
         ]
@@ -1358,14 +1434,295 @@ class AgentCoordinator:
                 attendee_note = " I'll fetch all active employees from the system as attendees."
             elif marker.startswith("@dept:"):
                 dept = marker.split(":", 1)[1]
-                attendee_note = (
-                    f" I'll fetch all active {dept} team members from the system as attendees."
-                )
+                attendee_note = f"I'll pull in the entire {dept} team automatically."
 
+        # ── Missing field labels ──────────────────────────────────────────────
+        label_map = {
+            "title": "meeting title",
+            "provider": "platform (Google Meet, Zoom, or Teams)",
+            "date": "date",
+            "time": "time",
+        }
+        missing_labels = [label_map[f] for f in missing_fields]
+        if len(missing_labels) == 1:
+            missing_str = f"the {missing_labels[0]}"
+        elif len(missing_labels) == 2:
+            missing_str = f"the {missing_labels[0]} and the {missing_labels[1]}"
+        else:
+            missing_str = ", ".join(f"the {l}" for l in missing_labels[:-1]) + f", and the {missing_labels[-1]}"
+
+        # ── Compose the final message ────────────────────────────────────────────
+        example_title = schedule.title or "Team Sync"
+        if known_parts:
+            context = " ".join(known_parts)
+            opener = f"Perfect! I've got {context} locked in."
+            if attendee_note:
+                opener += f" {attendee_note}"
+            closer = (
+                f" Before I confirm — could you share {missing_str}? "
+                f"For example: '{example_title} on Google Meet.'"
+            )
+        else:
+            opener = "Happy to get that scheduled!"
+            if attendee_note:
+                opener += f" {attendee_note}"
+            closer = (
+                f" I just need {missing_str} to move forward. "
+                f"Share them in one message — for example: '{example_title} on Google Meet for Apr 25 at 8:00 PM.'"
+            )
+
+        return opener + closer
+
+    def _build_missing_meeting_message(self, schedule: MeetingScheduleDraft) -> str:
+        """Build a humanlike, context-aware clarification message."""
+        missing_fields = schedule.missing_fields()
+
+        today = self._meeting_reference_now().date()
+        date_display: str | None = None
+        if schedule.date:
+            try:
+                parsed = datetime.fromisoformat(schedule.date).date()
+                if parsed == today:
+                    date_display = "tonight"
+                elif parsed == today + timedelta(days=1):
+                    date_display = "tomorrow"
+                else:
+                    date_display = schedule.date
+            except ValueError:
+                date_display = schedule.date
+
+        known_parts: list[str] = []
+        if schedule.title:
+            known_parts.append(f"\"{schedule.title}\"")
+        if date_display:
+            known_parts.append(f"for {date_display}")
+        if schedule.time:
+            known_parts.append(f"at {schedule.time}")
+        if schedule.provider:
+            provider_label = {
+                "gmeet": "Google Meet",
+                "zoom": "Zoom",
+                "teams": "Teams",
+            }.get(schedule.provider, schedule.provider)
+            known_parts.append(f"on {provider_label}")
+
+        group_markers = [
+            a for a in schedule.attendees if isinstance(a, str) and a.startswith("@")
+        ]
+        attendee_note = ""
+        if group_markers:
+            marker = group_markers[0]
+            if marker == "@all_employees":
+                attendee_note = " I'll fetch all active employees from the system as attendees."
+            elif marker.startswith("@dept:"):
+                dept = marker.split(":", 1)[1]
+                attendee_note = f"I'll pull in the entire {dept} team automatically."
+
+        label_map = {
+            "title": "meeting title",
+            "provider": "platform (Google Meet, Zoom, or Teams)",
+            "date": "date",
+            "time": "time",
+        }
+        missing_labels = [label_map[field] for field in missing_fields]
+        if len(missing_labels) == 1:
+            missing_str = f"the {missing_labels[0]}"
+        elif len(missing_labels) == 2:
+            missing_str = f"the {missing_labels[0]} and the {missing_labels[1]}"
+        else:
+            missing_str = ", ".join(f"the {label}" for label in missing_labels[:-1]) + f", and the {missing_labels[-1]}"
+
+        if known_parts:
+            opener = f"Perfect! I've got {' '.join(known_parts)} locked in."
+            if attendee_note:
+                opener += f" {attendee_note}"
+            return opener + f" Before I confirm, could you share {missing_str}?"
+
+        example_title = schedule.title or "Team Sync"
+        opener = "Happy to get that scheduled!"
+        if attendee_note:
+            opener += f" {attendee_note}"
         return (
-            f"I can schedule the meeting.{attendee_note} I still need the "
-            f"{missing}. Share them in one message, for example: "
-            "'Fortnightly Engineering Call on Google Meet for Apr 25 at 8:00 PM.'"
+            opener
+            + f" I just need {missing_str} to move forward. "
+            + f"Share them in one message, for example: '{example_title} on Google Meet for Apr 25 at 8:00 PM.'"
+        )
+
+    def _build_past_meeting_time_message(self, schedule: MeetingScheduleDraft) -> str:
+        provider_label = {
+            "gmeet": "Google Meet",
+            "zoom": "Zoom",
+            "teams": "Teams",
+        }.get(schedule.provider or "", schedule.provider or "the selected platform")
+        parts = []
+        if schedule.title:
+            parts.append(f"\"{schedule.title}\"")
+        if schedule.date:
+            parts.append(f"for {schedule.date}")
+        if schedule.time:
+            parts.append(f"at {schedule.time}")
+        parts.append(f"on {provider_label}")
+        timezone_label = self._meeting_timezone_label()
+        return (
+            f"I've got {' '.join(parts)}, but that time is already in the past in the configured calendar "
+            f"timezone ({timezone_label}). Please send a future time or a new date."
+        )
+
+    @staticmethod
+    def _meeting_schedule_has_details(schedule: MeetingScheduleDraft | None) -> bool:
+        if schedule is None:
+            return False
+        return any(
+            [
+                schedule.title,
+                schedule.provider,
+                schedule.date,
+                schedule.time,
+                schedule.attendees,
+            ]
+        )
+
+    def _meeting_reference_now(self) -> datetime:
+        timezone_name = get_settings().google_calendar_timezone
+        try:
+            return datetime.now(ZoneInfo(timezone_name))
+        except Exception:
+            return datetime.now(UTC)
+
+    def _meeting_timezone_label(self) -> str:
+        return get_settings().google_calendar_timezone or "UTC"
+
+    @staticmethod
+    def _message_mentions_agent_join_preference(message: str) -> bool:
+        lowered = message.lower()
+        return any(
+            phrase in lowered
+            for phrase in [
+                "without ai",
+                "without the agent",
+                "don't join",
+                "do not join",
+                "no bot",
+                "include meetintel",
+                "include the agent",
+                "join with ai",
+            ]
+        )
+
+    def _merge_meeting_schedules(
+        self,
+        existing: MeetingScheduleDraft,
+        incoming: MeetingScheduleDraft,
+        *,
+        message: str,
+    ) -> MeetingScheduleDraft:
+        merged = MeetingScheduleDraft(
+            requested=True,
+            title=incoming.title or existing.title,
+            provider=incoming.provider or existing.provider,
+            date=incoming.date or existing.date,
+            time=incoming.time or existing.time,
+            attendees=incoming.attendees or existing.attendees,
+            agent_join=existing.agent_join,
+        )
+        if self._message_mentions_agent_join_preference(message):
+            merged.agent_join = incoming.agent_join
+        return merged
+
+    def _merge_with_meeting_schedule_draft(
+        self,
+        *,
+        draft_key: str,
+        message: str,
+        routing_plan: AgentRoutingPlan,
+    ) -> AgentRoutingPlan:
+        existing = self.meeting_schedule_drafts.get(draft_key)
+        if existing is None:
+            if routing_plan.intent == "meeting_schedule" and routing_plan.meeting_schedule:
+                return self._build_meeting_schedule_plan(
+                    routing_plan.meeting_schedule,
+                    reasoning=routing_plan.reasoning,
+                )
+            return routing_plan
+
+        incoming = routing_plan.meeting_schedule
+        if incoming is None:
+            parsed = self._extract_meeting_schedule_from_text(message)
+            if not self._meeting_schedule_has_details(parsed):
+                return routing_plan
+            incoming = parsed
+
+        merged = self._merge_meeting_schedules(existing, incoming, message=message)
+        return self._build_meeting_schedule_plan(
+            merged,
+            reasoning=routing_plan.reasoning or "Continue the in-progress meeting scheduling flow.",
+        )
+
+    def _parse_meeting_datetime(self, schedule: MeetingScheduleDraft) -> datetime | None:
+        if not schedule.date or not schedule.time:
+            return None
+
+        try:
+            meeting_date = datetime.fromisoformat(schedule.date).date()
+        except ValueError:
+            return None
+
+        normalized_time = schedule.time.strip().upper().replace(".", "")
+        normalized_time = re.sub(r"\s+", " ", normalized_time)
+
+        for fmt in ["%H:%M", "%I:%M %p", "%I %p", "%I:%M%p", "%I%p"]:
+            try:
+                parsed_time = datetime.strptime(normalized_time, fmt).time()
+                reference_now = self._meeting_reference_now()
+                return datetime.combine(meeting_date, parsed_time, tzinfo=reference_now.tzinfo)
+            except ValueError:
+                continue
+        return None
+
+    def _meeting_time_is_in_past(self, schedule: MeetingScheduleDraft) -> bool:
+        scheduled_for = self._parse_meeting_datetime(schedule)
+        if scheduled_for is None:
+            return False
+        return scheduled_for <= self._meeting_reference_now()
+
+    def _build_meeting_schedule_plan(
+        self,
+        schedule: MeetingScheduleDraft,
+        *,
+        reasoning: str,
+    ) -> AgentRoutingPlan:
+        missing_fields = schedule.missing_fields()
+        if missing_fields:
+            return AgentRoutingPlan(
+                intent="meeting_schedule",
+                primary_agent_alias="executor",
+                supporting_agent_aliases=["intel"] if schedule.agent_join else [],
+                create_workflow=True,
+                needs_clarification=True,
+                clarification_message=self._build_missing_meeting_message(schedule),
+                reasoning=reasoning,
+                meeting_schedule=schedule,
+            )
+
+        if self._meeting_time_is_in_past(schedule):
+            return AgentRoutingPlan(
+                intent="meeting_schedule",
+                primary_agent_alias="executor",
+                supporting_agent_aliases=["intel"] if schedule.agent_join else [],
+                create_workflow=True,
+                needs_clarification=True,
+                clarification_message=self._build_past_meeting_time_message(schedule),
+                reasoning=reasoning,
+                meeting_schedule=schedule,
+            )
+
+        return AgentRoutingPlan(
+            intent="meeting_schedule",
+            primary_agent_alias="executor",
+            supporting_agent_aliases=["intel"] if schedule.agent_join else [],
+            create_workflow=True,
+            reasoning=reasoning,
+            meeting_schedule=schedule,
         )
 
     @staticmethod
@@ -1616,60 +1973,23 @@ class AgentCoordinator:
         session: AsyncSession,
         draft: OnboardingDraft,
     ) -> tuple[Employee, Workflow]:
-        employee = Employee(
-            id=f"emp-{uuid4().hex[:8]}",
+        employee = await create_employee_record(
+            session,
             name=draft.name or "Unknown Employee",
             role=draft.role or "Employee",
             department=draft.department or "General",
             email=draft.email or f"user-{uuid4().hex[:6]}@nexuscore.ai",
-            phone=draft.phone,
-            location=draft.location,
-            start_date_label=draft.start_date or "TBD",
-            status="onboarding",
-            progress=100,
-            avatar="".join(part[0] for part in (draft.name or "UE").split()[:2]).upper(),
+            phone=draft.phone or "",
+            location=draft.location or "",
+            start_date=coerce_employee_start_date(draft.start_date or datetime.now(UTC)),
             photo_url=None,
+            status=EmployeeStatus.ONBOARDING,
         )
-        session.add(employee)
-
-        workflow = Workflow(
-            id=f"wf-{uuid4().hex[:6]}",
-            workflow_type="Employee Onboarding",
-            name=f"{employee.name} ({employee.department})",
-            status="completed",
-            health=100,
-            progress=100,
-            current_step="Onboarding Complete",
-            assigned_agent="Shield Verifier",
-            prediction="Automated onboarding completed successfully.",
-        )
-        session.add(workflow)
-
-        steps = [
-            ("Identity Verification", "Shield Verifier"),
-            ("Background Check Initiated", "Data Fetcher v4"),
-            ("Workspace Provisioning", "Action Exec Alpha"),
-            ("Hardware Request Submitted", "Nexus Orchestrator"),
-            ("Day 1 Calendar Created", "Action Exec Alpha"),
-            ("Onboarding Complete", "Shield Verifier"),
-        ]
-        for index, (name, assigned_agent) in enumerate(steps, start=1):
-            session.add(
-                WorkflowStep(
-                    workflow_id=workflow.id,
-                    position=index,
-                    name=name,
-                    agent=assigned_agent,
-                    status="completed",
-                    time_label="auto",
-                )
-            )
-
-        await self._write_audit_log(
+        workflow = await create_onboarding_workflow_artifacts(
             session,
+            employee_name=employee.name,
+            department=employee.department,
             agent_name="Nexus Orchestrator",
-            message=f"Completed onboarding workflow for {employee.name}.",
-            log_type="action",
         )
         return employee, workflow
 
@@ -1988,9 +2308,7 @@ class AgentCoordinator:
             if marker.startswith("@dept:"):
                 dept_filter = marker.split(":", 1)[1].strip()
 
-            query = select(Employee).where(
-                Employee.status.notin_(["inactive", "offboarded"])
-            )
+            query = select(Employee).where(Employee.status == EmployeeStatus.ACTIVE)
             if dept_filter:
                 query = query.where(Employee.department == dept_filter)
 

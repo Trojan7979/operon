@@ -38,6 +38,19 @@ const emptyOnboardingDraft = {
   photo: null,
 };
 
+function formatEmployeeStartDate(value) {
+  if (!value || typeof value !== 'string') {
+    return value || '';
+  }
+
+  const isoDateMatch = value.match(/^(\d{4}-\d{2}-\d{2})T/);
+  if (isoDateMatch) {
+    return isoDateMatch[1];
+  }
+
+  return value;
+}
+
 function findNextMissingStep(formData) {
   return onboardingAgentSteps.findIndex((step) => !formData[step.field]);
 }
@@ -371,7 +384,7 @@ export function OnboardingView({ token, routeAction = null, onRouteConsumed }) {
               { icon: Phone, label: 'Phone', value: selectedEmployee.phone },
               { icon: Building, label: 'Department', value: selectedEmployee.department },
               { icon: MapPin, label: 'Location', value: selectedEmployee.location },
-              { icon: Calendar, label: 'Start Date', value: selectedEmployee.startDate },
+              { icon: Calendar, label: 'Start Date', value: formatEmployeeStartDate(selectedEmployee.startDate) },
               { icon: Briefcase, label: 'Onboarding', value: `${selectedEmployee.progress}% Complete` },
             ].map((item, i) => (
               <div key={i} className="bg-black/30 p-4 rounded-xl border border-zinc-800">
