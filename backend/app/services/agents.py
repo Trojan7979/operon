@@ -48,7 +48,6 @@ class ToolResult:
             "invocationId": self.invocation_id,
         }
 
-
 @dataclass
 class OnboardingDraft:
     name: str | None = None
@@ -69,7 +68,6 @@ class OnboardingDraft:
             ("start_date", self.start_date),
         ]
         return [field for field, value in ordered_fields if not value]
-
 
 @dataclass
 class MeetingScheduleDraft:
@@ -893,6 +891,16 @@ class AgentCoordinator:
         if executor is None:
             raise ValueError("Meeting scheduling agent is not available.")
 
+        # ── Resolve group attendee markers to real employee emails ─────────────
+        # If the schedule contains group markers like @all_employees or
+        # @dept:Engineering, query the Employee table now so the meeting record
+        # and the Calendar invite both receive real email addresses.
+        resolved_emails = await self._resolve_group_attendees(session, schedule.attendees)
+        if resolved_emails:
+            # Replace the markers; keep any literal emails already in the list.
+            schedule.attendees = resolved_emails + self._filter_emails(schedule.attendees)
+        # ─────────────────────────────────────────────────────────────────────
+
         meeting = await self._schedule_meeting(
             session,
             requester=requester,
@@ -900,10 +908,10 @@ class AgentCoordinator:
             acting_agent_name=executor.name,
         )
 
-        # ── Real Google Calendar MCP call ─────────────────────────────────────
-        # When the provider is Google Meet and the MCP client is enabled, we
-        # call the actual stdio MCP server instead of the stub registry so a
-        # real Calendar event with a Meet link is created and invites are sent.
+        """Real Google Calendar MCP call:
+        When the provider is Google Meet and the MCP client is enabled, we
+        call the actual stdio MCP server instead of the stub registry so a
+        real Calendar event with a Meet link is created and invites are sent."""
         if (
             schedule.provider == "gmeet"
             and self.google_calendar_mcp.enabled
@@ -952,7 +960,6 @@ class AgentCoordinator:
                         ),
                         log_type="warning",
                     )
-        # ─────────────────────────────────────────────────────────────────────
 
         workflow = await self._create_meeting_scheduling_workflow(
             session,
@@ -1136,6 +1143,20 @@ class AgentCoordinator:
             "- agentJoin must be a JSON boolean true or false, never a string.\n"
             "- supportingAgents must be a JSON array, even when empty: []\n"
             "- When intent is NOT meeting_schedule, set meetingSchedule to null.\n"
+            "- Group attendees: when the user refers to a group of people rather than named individuals,\n"
+            "  set attendees to a resolvable marker instead of listing names — the backend will query\n"
+            "  the employee database to get real email addresses:\n"
+            "    'all employees' / 'everyone' / 'all current staff' → ['@all_employees']\n"
+            "    'all engineers' / 'engineering team' / 'all current engineers' → ['@dept:Engineering']\n"
+            "    'all designers' / 'design team' → ['@dept:Design']\n"
+            "    'all product managers' / 'product team' → ['@dept:Product']\n"
+            "    'all HR' / 'HR team' → ['@dept:HR']\n"
+            "    'all compliance' / 'compliance team' → ['@dept:Compliance']\n"
+            "    For any other department: ['@dept:{DepartmentName}'] (capitalise correctly).\n"
+            "- Title inference: if the user does not state a meeting title but the request implies\n"
+            "  a recurring or typed meeting (e.g. 'fortnightly call', 'weekly sync', 'monthly all-hands',\n"
+            "  'daily standup'), generate a short descriptive title such as 'Fortnightly Engineering Call'\n"
+            "  or 'Weekly All-Hands Sync'. Do not leave title null when a reasonable inference is possible.\n"
             "- Do NOT wrap the output in markdown code blocks or add any text outside the JSON.\n\n"
             "# Available agents\n"
             f"{agent_lines}\n\n"
@@ -1221,17 +1242,72 @@ class AgentCoordinator:
             for phrase in ["without ai", "without the agent", "don't join", "do not join", "no bot"]
         )
 
+        # ── Group attendee detection ──────────────────────────────────────────
+        # Check the full message for group-reference phrases and replace them
+        # with resolvable marker tokens before attempting "with …" extraction.
+        _group_patterns = [
+            (r"\ball\s+(?:current\s+)?(?:active\s+)?employees\b", "@all_employees"),
+            (r"\beveryone\b", "@all_employees"),
+            (r"\ball\s+(?:current\s+)?(?:active\s+)?staff\b", "@all_employees"),
+            (r"\ball\s+(?:current\s+)?(?:active\s+)?engineers?\b", "@dept:Engineering"),
+            (r"\bengineering\s+team\b", "@dept:Engineering"),
+            (r"\ball\s+(?:current\s+)?(?:active\s+)?designers?\b", "@dept:Design"),
+            (r"\bdesign\s+team\b", "@dept:Design"),
+            (r"\ball\s+(?:current\s+)?(?:active\s+)?product\s+managers?\b", "@dept:Product"),
+            (r"\bproduct\s+team\b", "@dept:Product"),
+            (r"\ball\s+(?:current\s+)?(?:active\s+)?hr\b", "@dept:HR"),
+            (r"\bhr\s+team\b", "@dept:HR"),
+            (r"\ball\s+(?:current\s+)?(?:active\s+)?compliance\b", "@dept:Compliance"),
+            (r"\bcompliance\s+team\b", "@dept:Compliance"),
+        ]
+        for _pattern, _marker in _group_patterns:
+            if re.search(_pattern, lowered):
+                schedule.attendees = [_marker]
+                break
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Title extraction ──────────────────────────────────────────────────
         quoted_title = re.search(r"['\"]([^'\"]+)['\"]", message)
         if quoted_title:
             schedule.title = quoted_title.group(1).strip()
         else:
             titled_match = re.search(
-                r"(?:called|titled)\s+([A-Z][A-Za-z0-9&\-\s]{3,})",
+                r"(?:called|titled)\s+([A-Z][A-Za-z0-9\&\-\s]{3,})",
                 message,
                 re.IGNORECASE,
             )
             if titled_match:
                 schedule.title = titled_match.group(1).strip(" .")
+
+        # Infer a descriptive title from cadence / meeting-type keywords when
+        # no explicit title was provided.
+        if not schedule.title:
+            _cadence_map = [
+                (r"\bfortnightly\b", "Fortnightly"),
+                (r"\bbiweekly\b", "Biweekly"),
+                (r"\bweekly\b", "Weekly"),
+                (r"\bdaily\b", "Daily"),
+                (r"\bmonthly\b", "Monthly"),
+                (r"\bquarterly\b", "Quarterly"),
+            ]
+            _format_map = [
+                (r"\ball.hands\b", "All-Hands"),
+                (r"\bstandup\b", "Standup"),
+                (r"\bretro\b", "Retrospective"),
+                (r"\bsync\b", "Sync"),
+                (r"\bcheck.in\b", "Check-in"),
+                (r"\bcall\b", "Call"),
+                (r"\bmeeting\b", "Meeting"),
+            ]
+            _cadence = next(
+                (label for pat, label in _cadence_map if re.search(pat, lowered)), None
+            )
+            _fmt = next(
+                (label for pat, label in _format_map if re.search(pat, lowered)), "Meeting"
+            )
+            if _cadence:
+                schedule.title = f"{_cadence} {_fmt}"
+        # ─────────────────────────────────────────────────────────────────────
 
         iso_date_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", message)
         if iso_date_match:
@@ -1249,11 +1325,13 @@ class AgentCoordinator:
         if time_match:
             schedule.time = time_match.group(0)
 
-        with_match = re.search(r"\bwith\s+(.+)$", message, re.IGNORECASE)
-        if with_match:
-            attendees_blob = with_match.group(1)
-            attendees_blob = re.split(r"\b(?:on|at|via|using)\b", attendees_blob, maxsplit=1)[0]
-            schedule.attendees = self._normalize_attendees(attendees_blob.replace(" and ", ", "))
+        # Only attempt "with …" attendee parsing when no group marker was set.
+        if not any(isinstance(a, str) and a.startswith("@") for a in schedule.attendees):
+            with_match = re.search(r"\bwith\s+(.+)$", message, re.IGNORECASE)
+            if with_match:
+                attendees_blob = with_match.group(1)
+                attendees_blob = re.split(r"\b(?:on|at|via|using)\b", attendees_blob, maxsplit=1)[0]
+                schedule.attendees = self._normalize_attendees(attendees_blob.replace(" and ", ", "))
 
         return schedule
 
@@ -1262,15 +1340,32 @@ class AgentCoordinator:
         missing_fields = schedule.missing_fields()
         label_map = {
             "title": "meeting title",
-            "provider": "provider",
-            "date": "date",
-            "time": "time",
+            "provider": "provider (Google Meet, Zoom, or Teams)",
+            "date": "date (e.g. Apr 25 or 2026-04-25)",
+            "time": "time (e.g. 8:00 PM)",
         }
         missing = ", ".join(label_map[field] for field in missing_fields)
+
+        # Build a note when group attendee markers are present so the user
+        # knows they do not have to list names manually.
+        group_markers = [
+            a for a in schedule.attendees if isinstance(a, str) and a.startswith("@")
+        ]
+        attendee_note = ""
+        if group_markers:
+            marker = group_markers[0]
+            if marker == "@all_employees":
+                attendee_note = " I'll fetch all active employees from the system as attendees."
+            elif marker.startswith("@dept:"):
+                dept = marker.split(":", 1)[1]
+                attendee_note = (
+                    f" I'll fetch all active {dept} team members from the system as attendees."
+                )
+
         return (
-            "I can automate the meeting scheduling, but I still need the "
-            f"{missing}. Share them in one line, for example: "
-            "'Schedule Q2 planning on Zoom for Apr 18 at 3:00 PM with Sarah Chen and Rupam Jana.'"
+            f"I can schedule the meeting.{attendee_note} I still need the "
+            f"{missing}. Share them in one message, for example: "
+            "'Fortnightly Engineering Call on Google Meet for Apr 25 at 8:00 PM.'"
         )
 
     @staticmethod
@@ -1869,8 +1964,51 @@ class AgentCoordinator:
         """Return only items that look like real email addresses."""
         return [
             a for a in attendees
-            if "@" in a and "." in a.split("@")[-1] and a.strip() != ""
+            if "@" in a and not a.startswith("@") and "." in a.split("@")[-1] and a.strip() != ""
         ]
+
+    async def _resolve_group_attendees(
+        self,
+        session: AsyncSession,
+        attendees: list[str],
+    ) -> list[str]:
+        """Resolve group marker tokens to real employee email addresses.
+
+        Supported markers:
+        - ``@all_employees`` — every active/onboarding employee
+        - ``@dept:{Name}`` — every active employee in that department
+        """
+        group_markers = [a for a in attendees if isinstance(a, str) and a.startswith("@")]
+        if not group_markers:
+            return []
+
+        resolved: list[str] = []
+        for marker in group_markers:
+            dept_filter: str | None = None
+            if marker.startswith("@dept:"):
+                dept_filter = marker.split(":", 1)[1].strip()
+
+            query = select(Employee).where(
+                Employee.status.notin_(["inactive", "offboarded"])
+            )
+            if dept_filter:
+                query = query.where(Employee.department == dept_filter)
+
+            employees = list(await session.scalars(query))
+            for emp in employees:
+                if emp.email and emp.email not in resolved:
+                    resolved.append(emp.email)
+
+        await self._write_audit_log(
+            session,
+            agent_name="Data Fetcher v4",
+            message=(
+                f"Resolved {len(resolved)} attendee email(s) from the employee database "
+                f"using group markers: {', '.join(group_markers)}."
+            ),
+            log_type="info",
+        )
+        return resolved
 
     @staticmethod
     def _build_specialist_summary(agent_name: str, tool_calls: list[dict]) -> str:
