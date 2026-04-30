@@ -503,6 +503,7 @@ async def seed_phase1_extensions(session: AsyncSession) -> None:
         ),
     ]
     session.add_all(conversations)
+    await session.flush()  # ensure conversations exist before messages reference them
 
     messages = [
         ConversationMessage(
@@ -537,6 +538,7 @@ async def seed_phase1_extensions(session: AsyncSession) -> None:
         ),
     ]
     session.add_all(messages)
+    await session.flush()  # ensure messages exist before tasks
 
     tasks = [
         AgentTask(
@@ -580,6 +582,7 @@ async def seed_phase1_extensions(session: AsyncSession) -> None:
         ),
     ]
     session.add_all(tasks)
+    await session.flush()  # ensure tasks exist before runs and handoffs reference them
 
     runs = [
         AgentRun(
@@ -636,6 +639,7 @@ async def seed_phase1_extensions(session: AsyncSession) -> None:
         ),
     ]
     session.add_all(runs)
+    await session.flush()  # ensure runs exist before invocations reference them
 
     handoffs = [
         AgentHandoff(

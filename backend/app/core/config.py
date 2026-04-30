@@ -21,8 +21,16 @@ class Settings(BaseSettings):
     google_calendar_token_path: str = ".secrets/google-calendar-token.json"
     google_calendar_id: str = "primary"
     google_calendar_timezone: str = "Asia/Kolkata"
+    enable_meeting_email_notifications: bool = False
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_use_tls: bool = True
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+    smtp_from_name: str = "NexusCore Notifications"
 
-    database_url: str = "sqlite+aiosqlite:///./operon.db"
+    database_url: str = "postgresql+asyncpg://localhost/operon"
 
     secret_key: str = "change-this-in-production"
     algorithm: str = "HS256"
