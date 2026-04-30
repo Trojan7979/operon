@@ -506,13 +506,16 @@ class AgentCoordinator:
             tool_calls.extend(delegated_calls)
             collaboration.extend(delegated_collaboration)
 
-        response_message = await self._compose_response(
-            agent=agent,
-            user_message=message,
-            tool_calls=tool_calls,
-            collaboration=collaboration,
-            fallback_message=fallback_message,
-        )
+        if routing_plan.intent == "onboarding":
+            response_message = fallback_message
+        else:
+            response_message = await self._compose_response(
+                agent=agent,
+                user_message=message,
+                tool_calls=tool_calls,
+                collaboration=collaboration,
+                fallback_message=fallback_message,
+            )
 
         self._complete_run(orchestrator_run, response_message)
         orchestrator_task.status = "completed"
@@ -651,6 +654,13 @@ class AgentCoordinator:
         requested_agent: Agent,
         message: str,
     ) -> AgentRoutingPlan:
+        if self._is_onboarding_intent(message):
+            return AgentRoutingPlan(
+                intent="onboarding",
+                primary_agent_alias="orchestrator",
+                reasoning="The request is about onboarding and should be delegated to the onboarding specialist interface.",
+            )
+
         if requested_agent.id != self.alias_map["orchestrator"]:
             return self._plan_direct_request(requested_agent)
 
@@ -751,10 +761,7 @@ class AgentCoordinator:
     def _fallback_plan_request(self, message: str) -> AgentRoutingPlan:
         normalized = message.lower()
 
-        onboarding_intent = any(
-            phrase in normalized
-            for phrase in ["onboard", "new hire", "hire a new", "create employee", "add employee"]
-        )
+        onboarding_intent = self._is_onboarding_intent(message)
         workflow_intent = any(word in normalized for word in ["task", "workflow", "approval", "route"])
         compliance_intent = any(word in normalized for word in ["compliance", "risk", "audit", "security"])
         retrieval_intent = any(word in normalized for word in ["find", "fetch", "search", "vendor", "employee"])
@@ -775,7 +782,7 @@ class AgentCoordinator:
             return AgentRoutingPlan(
                 intent="onboarding",
                 primary_agent_alias="orchestrator",
-                reasoning="The request is about onboarding a new employee and should move into the onboarding flow.",
+                reasoning="The request is about onboarding and should be delegated to the onboarding specialist interface.",
             )
 
         if meeting_schedule:
@@ -838,6 +845,21 @@ class AgentCoordinator:
             intent="general",
             primary_agent_alias="orchestrator",
             reasoning="The request should stay with the orchestrator until it is more specific.",
+        )
+
+    @staticmethod
+    def _is_onboarding_intent(message: str) -> bool:
+        normalized = message.lower()
+        return any(
+            phrase in normalized
+            for phrase in [
+                "onboard",
+                "onboarding",
+                "new hire",
+                "hire a new",
+                "create employee",
+                "add employee",
+            ]
         )
 
     async def _schedule_meeting(
@@ -937,6 +959,10 @@ class AgentCoordinator:
                     # Merge confirmed emails back; keep any non-email names (e.g. "MeetIntel Agent").
                     non_email_names = [a for a in meeting.attendees if "@" not in a]
                     meeting.attendees = (scheduled.attendee_emails or attendee_emails) + non_email_names
+                    # Persist the Calendar event ID and join links so the UI card can display them.
+                    meeting.gcal_event_id = scheduled.event_id or None
+                    meeting.meet_link = scheduled.meet_link or None
+                    meeting.html_link = scheduled.html_link or None
                     await self._write_audit_log(
                         session,
                         agent_name=executor.name,
@@ -1733,9 +1759,12 @@ class AgentCoordinator:
             if meeting.agent_joined
             else " The meeting will proceed without an AI attendee."
         )
+        link_line = (
+            f" Join link: {meeting.meet_link}" if meeting.meet_link else ""
+        )
         return (
-            f"I scheduled '{meeting.title}' on {meeting.date_label} at {meeting.time_label} via {meeting.provider}. "
-            f"I included {attendee_count} attendee{'s' if attendee_count != 1 else ''}.{agent_line}"
+            f"✅ '{meeting.title}' is confirmed for {meeting.date_label} at {meeting.time_label} via {meeting.provider}. "
+            f"Invites sent to {attendee_count} attendee{'s' if attendee_count != 1 else ''}.{agent_line}{link_line}"
         )
 
     @staticmethod
@@ -2082,10 +2111,11 @@ class AgentCoordinator:
             "type": "handoff",
             "targetTab": "onboarding",
             "targetAgentId": "workspace:onboarding",
+            "autoOpen": False,
             "conversationId": conversation_id,
             "ctaLabel": "Continue In Onboarding Workspace",
-            "title": "Specialist Handoff",
-            "description": "Nexus Orchestrator routed this goal to the Onboarding Agent workspace.",
+            "title": "Onboarding Agent",
+            "description": "Nexus Orchestrator delegated this onboarding request to the dedicated specialist interface.",
             "prefill": prefill,
             "trace": trace,
         }
@@ -2103,7 +2133,7 @@ class AgentCoordinator:
         summary = (
             f"I already captured {', '.join(details)}. "
             if details
-            else "I did not want to guess the employee details in chat. "
+            else "I'll let the specialist gather the employee details cleanly. "
         )
         email_guidance = (
             f"I also suggested the company email {prefill['suggestedEmail']}. "
@@ -2111,9 +2141,9 @@ class AgentCoordinator:
             else ""
         )
         return (
-            "I detected an onboarding request and routed it to the Onboarding Agent workspace. "
+            "Absolutely - this belongs with the Onboarding Agent. "
             f"{summary}{email_guidance}"
-            "Continue there and the specialist will collect the remaining fields, then kick off the automation steps."
+            "Open the handoff below when you are ready, and the specialist will take it from there."
         )
 
     @staticmethod

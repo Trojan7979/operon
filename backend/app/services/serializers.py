@@ -309,12 +309,16 @@ def serialize_meeting(meeting: Meeting) -> dict:
         "status": meeting.status,
         "agentJoined": meeting.agent_joined,
         "agentName": meeting.agent_name,
+        "gcalEventId": meeting.gcal_event_id,
+        "meetLink": meeting.meet_link,
+        "htmlLink": meeting.html_link,
         "transcript": [
             {"time": line.time_label, "speaker": line.speaker, "text": line.text}
             for line in meeting.transcript_lines
         ],
         "extracted": [serialize_meeting_item(item) for item in meeting.extracted_items],
     }
+
 
 
 def serialize_employee(employee: Employee) -> dict:

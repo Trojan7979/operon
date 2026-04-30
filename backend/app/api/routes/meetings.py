@@ -1,12 +1,14 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user
-from app.db.models import AuditLog, Meeting, MeetingItem, User
+from app.db.models import AuditLog, Employee, Meeting, MeetingItem, User
 from app.db.session import get_db_session
 from app.schemas import MeetingItemOut, MeetingOut, ScheduleMeetingRequest
 from app.services.mcp_calendar import GoogleCalendarMcpClient, build_google_meet_datetimes
@@ -49,6 +51,29 @@ def heuristic_extract(lines: list[dict]) -> list[dict]:
     return items[:8]
 
 
+async def _resolve_attendee_emails(attendees: list[str], session: AsyncSession) -> list[str]:
+    """Resolve a mixed list of display names and/or emails to email addresses.
+
+    Values that already contain '@' are kept as-is.  Plain names are looked up
+    against the Employee table (case-insensitive); unresolvable names are
+    retained as-is so callers can decide whether to reject them.
+    """
+    resolved: list[str] = []
+    for value in attendees:
+        value = value.strip()
+        if not value:
+            continue
+        if "@" in value:
+            resolved.append(value)
+        else:
+            # Try to map display name → employee email
+            employee = await session.scalar(
+                select(Employee).where(func.lower(Employee.name) == value.lower())
+            )
+            resolved.append(employee.email if employee else value)
+    return resolved
+
+
 def _normalize_attendee_emails(attendees: list[str], organizer_email: str) -> list[str]:
     normalized = []
     for value in attendees:
@@ -59,6 +84,78 @@ def _normalize_attendee_emails(attendees: list[str], organizer_email: str) -> li
     if organizer_email and organizer_email.lower() not in {item.lower() for item in normalized}:
         normalized.insert(0, organizer_email)
     return normalized
+
+
+@router.get("/google-calendar/connect", tags=["meetings"])
+async def google_calendar_connect(
+    _: User = Depends(get_current_user),
+) -> dict:
+    """Trigger the one-time Google OAuth flow to obtain and persist a Calendar token.
+
+    Opens a browser window on the server machine.  Call this endpoint once
+    after setting GOOGLE_CALENDAR_CLIENT_SECRET_PATH; the token is saved to
+    GOOGLE_CALENDAR_TOKEN_PATH and reused automatically on all future calls.
+    """
+    from pathlib import Path
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    client_secret_path = Path(settings.google_calendar_client_secret_path or "")
+    token_path = Path(settings.google_calendar_token_path)
+
+    if not settings.enable_google_calendar_mcp:
+        raise HTTPException(
+            status_code=503,
+            detail="ENABLE_GOOGLE_CALENDAR_MCP is not set to true.",
+        )
+    if not client_secret_path.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"OAuth client secret file not found: {client_secret_path}",
+        )
+
+    # Check if a valid token already exists — skip the flow if so.
+    if token_path.exists() and token_path.stat().st_size > 0:
+        try:
+            from google.oauth2.credentials import Credentials
+
+            creds = Credentials.from_authorized_user_file(
+                str(token_path),
+                ["https://www.googleapis.com/auth/calendar.events"],
+            )
+            if creds and creds.valid:
+                return {"status": "already_connected", "message": "Google Calendar is already authorized."}
+        except Exception:
+            pass  # Corrupt token — proceed to re-authorise
+
+    def _run_oauth() -> str:
+        """Blocking OAuth flow — runs in a thread so it doesn't block the event loop."""
+        from google_auth_oauthlib.flow import InstalledAppFlow
+
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(client_secret_path),
+            ["https://www.googleapis.com/auth/calendar.events"],
+        )
+        creds = flow.run_local_server(port=0)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(creds.to_json(), encoding="utf-8")
+        return creds.token
+
+    try:
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            await loop.run_in_executor(executor, _run_oauth)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"OAuth flow failed: {exc}",
+        ) from exc
+
+    return {
+        "status": "connected",
+        "message": "Google Calendar authorized successfully. Token saved — meeting scheduling is now active.",
+    }
 
 
 @router.get("", response_model=list[MeetingOut])
@@ -100,9 +197,13 @@ async def schedule_meeting(
 ) -> MeetingOut:
     attendees = payload.attendees or [current_user.email]
     audit_agent = "Action Exec Alpha"
+    gcal_event_id: str | None = None
+    meet_link: str | None = None
+    html_link: str | None = None
 
     if payload.provider == "gmeet" and google_calendar_mcp.enabled:
-        attendee_emails = _normalize_attendee_emails(attendees, current_user.email)
+        resolved = await _resolve_attendee_emails(attendees, session)
+        attendee_emails = _normalize_attendee_emails(resolved, current_user.email)
         if not attendee_emails:
             raise HTTPException(
                 status_code=400,
@@ -125,6 +226,9 @@ async def schedule_meeting(
             ) from exc
 
         attendees = scheduled.attendee_emails or attendee_emails
+        gcal_event_id = scheduled.event_id or None
+        meet_link = scheduled.meet_link or None
+        html_link = scheduled.html_link or None
     elif payload.provider == "gmeet" and not google_calendar_mcp.enabled:
         raise HTTPException(
             status_code=503,
@@ -148,6 +252,9 @@ async def schedule_meeting(
         agent_joined=payload.agentJoin,
         agent_name="MeetIntel Core" if payload.agentJoin else None,
         attendees=attendees,
+        gcal_event_id=gcal_event_id,
+        meet_link=meet_link,
+        html_link=html_link,
     )
     session.add(meeting)
     session.add(

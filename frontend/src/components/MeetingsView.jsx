@@ -3,7 +3,7 @@ import {
   Video, Calendar, Clock, Users, ChevronRight, X,
   MessageSquare, Zap, CheckCircle2, AlertTriangle,
   ArrowRight, User, Search, Bot, Loader,
-  CalendarPlus, BrainCircuit, Mic
+  CalendarPlus, BrainCircuit, Mic, ExternalLink, Link
 } from 'lucide-react';
 import { analyzeMeeting, fetchMeetings, scheduleMeeting } from '../api';
 
@@ -353,6 +353,39 @@ export function MeetingsView({ token }) {
                 </span>
               ))}
             </div>
+
+            {/* Meet link + event ID row */}
+            {(selectedMeeting.meetLink || selectedMeeting.gcalEventId) && (
+              <div className="flex flex-wrap items-center gap-3 mt-4 pt-4 border-t border-zinc-800">
+                {selectedMeeting.meetLink && (
+                  <a
+                    href={selectedMeeting.meetLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    className="flex items-center gap-2 px-4 py-2 bg-green-500/10 hover:bg-green-500/20 border border-green-500/30 text-green-400 rounded-xl text-xs font-semibold transition-all"
+                  >
+                    <Video className="h-3.5 w-3.5" /> Join Meeting <ExternalLink className="h-3 w-3 opacity-70" />
+                  </a>
+                )}
+                {selectedMeeting.htmlLink && (
+                  <a
+                    href={selectedMeeting.htmlLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    className="flex items-center gap-2 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-400 rounded-xl text-xs font-semibold transition-all"
+                  >
+                    <Link className="h-3.5 w-3.5" /> Calendar Event <ExternalLink className="h-3 w-3 opacity-70" />
+                  </a>
+                )}
+                {selectedMeeting.gcalEventId && (
+                  <span className="flex items-center gap-1.5 text-[10px] text-zinc-600 font-mono bg-zinc-900 px-2 py-1 rounded-lg border border-zinc-800">
+                    ID: {selectedMeeting.gcalEventId}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
@@ -511,6 +544,22 @@ export function MeetingsView({ token }) {
                       </div>
                     </div>
                     <div className="flex items-center gap-3 flex-shrink-0">
+                      {meeting.meetLink && (
+                        <a
+                          href={meeting.meetLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={e => e.stopPropagation()}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/10 hover:bg-green-500/20 border border-green-500/30 text-green-400 rounded-lg text-xs font-semibold transition-all whitespace-nowrap"
+                        >
+                          <Video className="h-3 w-3" /> Join
+                        </a>
+                      )}
+                      {meeting.gcalEventId && (
+                        <span className="hidden lg:block text-[10px] text-zinc-600 font-mono bg-zinc-900 px-2 py-1 rounded border border-zinc-800 whitespace-nowrap">
+                          {meeting.gcalEventId.slice(0, 12)}…
+                        </span>
+                      )}
                       {meeting.extracted.length > 0 && (
                         <span className="px-2 py-1 bg-purple-500/10 text-purple-400 rounded-lg text-xs border border-purple-500/20">
                           {meeting.extracted.length} items

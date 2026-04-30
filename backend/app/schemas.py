@@ -260,8 +260,12 @@ class MeetingOut(BaseModel):
     status: str
     agentJoined: bool
     agentName: str | None = None
+    gcalEventId: str | None = None
+    meetLink: str | None = None
+    htmlLink: str | None = None
     transcript: list[MeetingLineOut] = Field(default_factory=list)
     extracted: list[MeetingItemOut] = Field(default_factory=list)
+
 
 
 class ScheduleMeetingRequest(BaseModel):

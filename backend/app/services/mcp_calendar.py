@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -67,7 +68,25 @@ class GoogleCalendarMcpClient:
         if result.isError:
             raise RuntimeError(self._extract_error_message(result))
 
-        payload = result.structuredContent or {}
+        # `structuredContent` is only populated by newer MCP SDK builds.
+        # Older versions (and some transports) return the result as a JSON
+        # string inside result.content[0].text — parse that as a fallback.
+        payload: dict = {}
+        if result.structuredContent and isinstance(result.structuredContent, dict):
+            payload = result.structuredContent
+        else:
+            content_items = getattr(result, "content", []) or []
+            for item in content_items:
+                raw_text = getattr(item, "text", None)
+                if raw_text:
+                    try:
+                        parsed = json.loads(raw_text)
+                        if isinstance(parsed, dict):
+                            payload = parsed
+                            break
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+
         if not isinstance(payload, dict) or not payload.get("eventId"):
             raise RuntimeError("Google Calendar MCP server returned an invalid response.")
 
