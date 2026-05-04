@@ -38,6 +38,9 @@ const emptyOnboardingDraft = {
   photo: null,
 };
 
+const MAX_PROFILE_PHOTO_SIZE = 256;
+const PROFILE_PHOTO_QUALITY = 0.72;
+
 function formatEmployeeStartDate(value) {
   if (!value || typeof value !== 'string') {
     return value || '';
@@ -49,6 +52,54 @@ function formatEmployeeStartDate(value) {
   }
 
   return value;
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (event) => resolve(event.target.result);
+    reader.onerror = () => reject(new Error('Unable to read the selected profile photo.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function resizeImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+
+      const scale = Math.min(
+        1,
+        MAX_PROFILE_PHOTO_SIZE / Math.max(image.width, image.height),
+      );
+      const width = Math.max(1, Math.round(image.width * scale));
+      const height = Math.max(1, Math.round(image.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+
+      const context = canvas.getContext('2d');
+      if (!context) {
+        reject(new Error('Unable to prepare the selected profile photo.'));
+        return;
+      }
+
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', PROFILE_PHOTO_QUALITY));
+    };
+
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Please choose a valid image file for the profile photo.'));
+    };
+
+    image.src = objectUrl;
+  });
 }
 
 function findNextMissingStep(formData) {
@@ -220,22 +271,30 @@ export function OnboardingView({ token, routeAction = null, onRouteConsumed }) {
     }, 600);
   };
 
-  const handleFileUpload = (e) => {
+  const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const photoData = event.target.result;
+
+    setError('');
+    setIsAgentTyping(true);
+
+    try {
+      const photoData = file.type.startsWith('image/')
+        ? await resizeImageFile(file)
+        : await readFileAsDataUrl(file);
       const nextFormData = { ...formData, photo: photoData };
       setFormData(nextFormData);
       setChatHistory(prev => [...prev, { sender: 'user', text: 'Photo uploaded', isPhoto: true, photoUrl: photoData }]);
-      setIsAgentTyping(true);
       window.setTimeout(() => {
         setIsAgentTyping(false);
         queueAutomation(nextFormData);
       }, 600);
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      setIsAgentTyping(false);
+      setError(err.message || 'Unable to process the selected profile photo.');
+    } finally {
+      e.target.value = '';
+    }
   };
 
   useEffect(() => {

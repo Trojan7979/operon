@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Send, User, Cpu, BrainCircuit, Database,
-  Zap, ShieldCheck, Loader, Sparkles, Network, ArrowRightLeft
+  Zap, ShieldCheck, Loader, Sparkles, Network, ArrowRightLeft, UserPlus
 } from 'lucide-react';
 import { getApiBase, sendAgentMessage, subscribeApiTrace } from '../api';
 
@@ -29,11 +29,32 @@ const starterMessages = {
   verifier: "Shield Verifier is online. Ask me to validate risk, compliance, or audit-related concerns.",
 };
 
-function RouteActionCard({ action, onContinue }) {
-  const [showTrace, setShowTrace] = useState(false);
+function buildOnboardingWorkspaceAction(reason = 'shortcut') {
+  return {
+    type: 'handoff',
+    targetTab: 'onboarding',
+    targetAgentId: 'workspace:onboarding',
+    autoOpen: false,
+    ctaLabel: 'Open Onboarding Workspace',
+    title: 'Onboarding Agent',
+    description:
+      reason === 'quickPrompt'
+        ? 'Start the guided employee onboarding intake directly with the Onboarding Agent.'
+        : 'Switch directly to the dedicated Onboarding Agent workspace.',
+    prefill: {},
+    trace: [
+      'The user selected the Onboarding Agent entry point.',
+      'NexusCore opened the dedicated onboarding workspace for guided intake and automation.',
+    ],
+  };
+}
+
+function RouteActionCard({ action, onContinue, collaboration = [], invokedTools = [], workflowId, renderAgentLabel }) {
+  const [showDetails, setShowDetails] = useState(false);
   const captured = Object.entries(action.prefill ?? {})
     .filter(([, value]) => value)
     .filter(([key]) => !['phone', 'location', 'attendees'].includes(key));
+  const hasDetails = action.trace?.length > 0 || collaboration.length > 0 || invokedTools.length > 0;
 
   const title = action.title ?? (action.targetTab === 'meetings' ? 'Meeting Automation' : 'Specialist Handoff');
   const description =
@@ -69,22 +90,60 @@ function RouteActionCard({ action, onContinue }) {
         >
           {action.ctaLabel ?? 'Continue'}
         </button>
-        {action.trace?.length > 0 && (
+        {hasDetails && (
           <button
-            onClick={() => setShowTrace((value) => !value)}
+            onClick={() => setShowDetails((value) => !value)}
             className="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 transition-colors hover:border-cyan-500/40 hover:text-white"
           >
-            {showTrace ? 'Hide Execution Trace' : 'Show Execution Trace'}
+            {showDetails ? 'Hide Routing Details' : 'Show Routing Details'}
           </button>
         )}
       </div>
-      {showTrace && action.trace?.length > 0 && (
+      {showDetails && hasDetails && (
         <div className="mt-3 space-y-2 rounded-xl border border-zinc-800 bg-black/30 px-3 py-3">
-          {action.trace.map((step, index) => (
-            <p key={`${step}-${index}`} className="text-xs text-zinc-400">
-              {index + 1}. {step}
-            </p>
-          ))}
+          {action.trace?.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Steps Taken</p>
+              {action.trace.map((step, index) => (
+                <p key={`${step}-${index}`} className="text-xs text-zinc-400">
+                  {index + 1}. {step}
+                </p>
+              ))}
+            </div>
+          )}
+          {collaboration.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Agent Calls</p>
+              {collaboration.map((entry, idx) => (
+                <div key={`${entry.handoffId ?? idx}`} className="rounded-lg border border-purple-500/10 bg-black/30 px-3 py-2">
+                  <div className="flex items-center gap-2 text-xs text-purple-300 font-semibold">
+                    <ArrowRightLeft className="h-3 w-3" />
+                    <span>
+                      {renderAgentLabel(entry.fromAgentId)} {'->'} {renderAgentLabel(entry.toAgentId)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-400">{entry.reason}</p>
+                  <p className="mt-1 text-[10px] uppercase tracking-wider text-zinc-500">
+                    {entry.status} {workflowId ? `- workflow ${workflowId}` : ''}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+          {invokedTools.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Tools</p>
+              {invokedTools.map((tool, idx) => (
+                <div key={`${tool.toolName}-${idx}`} className="rounded-lg border border-cyan-500/10 bg-black/30 px-3 py-2">
+                  <div className="flex items-center justify-between gap-3 mb-1">
+                    <span className="text-xs font-semibold text-cyan-300">{tool.toolName}</span>
+                    <span className="text-[10px] uppercase tracking-wider text-zinc-500">{tool.status}</span>
+                  </div>
+                  <p className="text-xs text-zinc-400">{tool.summary}</p>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -126,6 +185,10 @@ export function AgentChat({ token, onRouteIntent }) {
     ]);
   };
 
+  const openOnboardingWorkspace = (reason = 'shortcut') => {
+    onRouteIntent?.(buildOnboardingWorkspaceAction(reason));
+  };
+
   const sendMessage = async () => {
     if (!input.trim()) return;
     const userMsg = input.trim();
@@ -136,6 +199,7 @@ export function AgentChat({ token, onRouteIntent }) {
 
     try {
       const response = await sendAgentMessage(token, selectedAgent.id, userMsg, conversationId);
+      const routeAction = response.routeAction ?? null;
       setConversationId(response.conversationId ?? null);
       setMessages(prev => [
         ...prev,
@@ -147,7 +211,7 @@ export function AgentChat({ token, onRouteIntent }) {
           collaboration: response.collaboration ?? [],
           workflowId: response.workflowId ?? null,
           conversationId: response.conversationId ?? null,
-          routeAction: response.routeAction ?? null,
+          routeAction,
         }
       ]);
     } catch (err) {
@@ -211,21 +275,37 @@ export function AgentChat({ token, onRouteIntent }) {
           })}
 
           <div className="mt-6 pt-4 border-t border-zinc-800">
+            <p className="text-xs text-zinc-500 uppercase tracking-wider font-semibold mb-3 px-1">Specialist Workspace</p>
+            <button
+              onClick={() => openOnboardingWorkspace('shortcut')}
+              className="mb-5 w-full rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-3 text-left transition-all hover:border-cyan-400/60 hover:bg-cyan-500/15"
+            >
+              <div className="flex items-center gap-3">
+                <div className="h-9 w-9 rounded-lg bg-cyan-500/10 flex items-center justify-center text-cyan-400">
+                  <UserPlus className="h-5 w-5" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-medium text-cyan-300">Onboarding Agent</h4>
+                  <p className="text-[10px] text-zinc-500">Guided employee intake</p>
+                </div>
+              </div>
+            </button>
+
             <p className="text-xs text-zinc-500 uppercase tracking-wider font-semibold mb-3 px-1">Quick Prompts</p>
             {[
-              'Check system status',
-              'Start a new workflow',
-              'Onboard a new employee',
-              'Find vendor info',
-              'Run compliance check',
-              'Summarize meetings'
+              { label: 'Check system status' },
+              { label: 'Start a new workflow' },
+              { label: 'Onboard a new employee' },
+              { label: 'Find vendor info' },
+              { label: 'Run compliance check' },
+              { label: 'Summarize meetings' }
             ].map((prompt, i) => (
               <button
                 key={i}
-                onClick={() => setInput(prompt)}
+                onClick={() => prompt.action ? prompt.action() : setInput(prompt.label)}
                 className="w-full text-left px-3 py-2 text-xs text-zinc-400 hover:text-cyan-400 hover:bg-zinc-800/50 rounded-lg transition-colors"
               >
-                <Sparkles className="h-3 w-3 inline mr-2 opacity-50" />{prompt}
+                <Sparkles className="h-3 w-3 inline mr-2 opacity-50" />{prompt.label}
               </button>
             ))}
           </div>
@@ -263,7 +343,7 @@ export function AgentChat({ token, onRouteIntent }) {
                     : 'bg-zinc-800/80 text-zinc-300 rounded-bl-none border border-zinc-700'
                 }`}>
                   {renderText(msg.text)}
-                  {msg.sender === 'agent' && msg.collaboration?.length > 0 && (
+                  {msg.sender === 'agent' && !msg.routeAction && msg.collaboration?.length > 0 && (
                     <div className="mt-3 space-y-2">
                       <p className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
                         Agent Collaboration
@@ -287,7 +367,7 @@ export function AgentChat({ token, onRouteIntent }) {
                       ))}
                     </div>
                   )}
-                  {msg.sender === 'agent' && msg.invokedTools?.length > 0 && (
+                  {msg.sender === 'agent' && !msg.routeAction && msg.invokedTools?.length > 0 && (
                     <div className="mt-3 space-y-2">
                       <p className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
                         Tool Activity
@@ -309,7 +389,14 @@ export function AgentChat({ token, onRouteIntent }) {
                     </div>
                   )}
                   {msg.sender === 'agent' && msg.routeAction && (
-                    <RouteActionCard action={msg.routeAction} onContinue={onRouteIntent} />
+                    <RouteActionCard
+                      action={msg.routeAction}
+                      onContinue={onRouteIntent}
+                      collaboration={msg.collaboration ?? []}
+                      invokedTools={msg.invokedTools ?? []}
+                      workflowId={msg.workflowId}
+                      renderAgentLabel={renderAgentLabel}
+                    />
                   )}
                 </div>
                 {msg.sender === 'user' && (
