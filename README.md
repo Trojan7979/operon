@@ -73,7 +73,7 @@ This makes the collaboration visible both in backend APIs and in the frontend ch
 - `frontend/`
   React + Vite demo UI
 - `backend/`
-  FastAPI backend, SQLite persistence, seeded demo data, orchestration logic
+  FastAPI backend, PostgreSQL persistence (Supabase), seeded demo data, orchestration logic
 - `DEPLOYMENT.md`
   deployment notes
 
@@ -157,7 +157,7 @@ OpenAPI docs are available at `http://127.0.0.1:8000/docs` when the backend is r
 ## Tech Stack
 
 - Frontend: React, Vite, Tailwind CSS
-- Backend: python, FastAPI, SQLAlchemy, SQLite
+- Backend: Python, FastAPI, SQLAlchemy, PostgreSQL (Supabase)
 - Auth: JWT bearer tokens + refresh session records
 - AI: Vertex AI with Gemini 2.5 Flash
 - Deployment target: Cloud Run
@@ -169,7 +169,7 @@ This implementation uses a custom multi-agent orchestration layer instead of a f
 - Orchestration: custom `AgentCoordinator` service for typed intent routing, handoffs, workflow creation, specialist-agent coordination, and draft-state continuation
 - LLM gateway: Vertex AI via `google-cloud-aiplatform` and `google-generativeai`
 - API layer: FastAPI
-- Data modeling and persistence: Pydantic, SQLAlchemy, SQLite
+- Data modeling and persistence: Pydantic, SQLAlchemy, PostgreSQL (Supabase)
 - Auth and sessions: `python-jose`, `passlib`, JWT access tokens, refresh-session records
 - Agent observability: persisted conversations, agent runs, tasks, handoffs, tool invocations, and audit logs exposed through the agent API
 - Tool integrations: MCP Python SDK (`mcp[cli]`) plus a database-backed MCP-style tool registry for demo-scoped tools
