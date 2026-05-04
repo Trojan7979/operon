@@ -229,6 +229,9 @@ class Meeting(Base):
     agent_joined: Mapped[bool] = mapped_column(Boolean, default=False)
     agent_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     attendees: Mapped[list[str]] = mapped_column(JSON, default=list)
+    gcal_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    meet_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    html_link: Mapped[str | None] = mapped_column(Text, nullable=True)
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
@@ -285,6 +288,7 @@ class Employee(Base):
     phone: Mapped[str] = mapped_column(String(64), default="")
     location: Mapped[str] = mapped_column(String(120), default="")
     start_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    start_date_label: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     status: Mapped[EmployeeStatus] = mapped_column(
         SqlEnum(
             EmployeeStatus,
